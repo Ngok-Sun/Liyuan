@@ -21,6 +21,7 @@ import {
 	type LoreSearchHit,
 } from "../api.ts";
 import { bumpWatchPanels, ConfirmButton, Field, PanelStatus, SearchInput, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { IconMore } from "./icons.tsx";
 import { t } from "../i18n/index.ts";
 
 const SOURCE_LABEL: Record<LoreEntryView["source"], string> = {
@@ -80,6 +81,7 @@ function EntryRow({
 	onToggle,
 	onPatch,
 	onDelete,
+	onOpenDetail,
 }: {
 	e: LoreEntryView;
 	busy: boolean;
@@ -88,6 +90,7 @@ function EntryRow({
 	onToggle: (fingerprint: string, enabled: boolean) => void;
 	onPatch: (body: LoreEntryPatchBody, doneText?: string) => void;
 	onDelete: (fingerprint: string) => void;
+	onOpenDetail?: (e: LoreEntryView) => void;
 }) {
 	const [open, setOpen] = useState(false);
 	const [editing, setEditing] = useState(false);
@@ -182,16 +185,29 @@ function EntryRow({
 				<details open={open} onToggle={(ev) => setOpen((ev.target as HTMLDetailsElement).open)}>
 					<summary>
 						<span className="lore-title">{e.comment || e.keys[0] || t("（未命名）")}</span>
-						<span className="lore-order" title={t("插入优先级 order（越小越靠前）")}>
-							#{e.order}
-						</span>
-						{e.selective && e.secondaryKeys.length > 0 && (
-							<span className="chip chip-selective" title={t("次要关键词也需命中（selective）")}>
-								AND
-							</span>
-						)}
-						<span className={`chip chip-src chip-src-${e.source}`}>{t(SOURCE_LABEL[e.source])}</span>
-						<span className="lore-meta">{t("{n} 字", { n: e.chars })}</span>
+							{e.selective && e.secondaryKeys.length > 0 && (
+								<span className="chip chip-selective" title={t("次要关键词也需命中（selective）")}>
+									AND
+								</span>
+							)}
+							<span className="lore-meta">{t("{n} 字", { n: e.chars })}</span>
+							<button
+								type="button"
+								className="drawer-btn lore-detail-btn"
+								title={t("详情")}
+								onClick={(ev) => {
+									ev.preventDefault();
+									ev.stopPropagation();
+									const isMobile = typeof window !== "undefined" && window.innerWidth < 1000;
+									if (isMobile) {
+										setOpen((v) => !v);
+									} else {
+										onOpenDetail?.(e);
+									}
+								}}
+							>
+								{t("详情")}
+							</button>
 					</summary>
 
 					{!editing && (
@@ -326,6 +342,7 @@ function BooksSection({
 	const [newMount, setNewMount] = useState(true);
 	const [newFirstTitle, setNewFirstTitle] = useState("");
 	const [newFirstContent, setNewFirstContent] = useState("");
+	const [actionBook, setActionBook] = useState<string | null>(null);
 	/** 书名 + 首条正文都齐了才能建：空书挂不上、也不出现在书单里（服务端注释有据） */
 	const canCreate = newName.trim().length > 0 && newFirstContent.trim().length > 0;
 
@@ -467,7 +484,8 @@ function BooksSection({
 						const mounted = activeSet.has(b.path);
 						const viewing = viewingFile === b.path;
 						return (
-							<div key={b.path} className={`book-row ${viewing ? "current" : ""}`}>
+							<div key={b.path} className={`book-item-wrap ${viewing ? "current" : ""}`}>
+								<div className={`book-row ${viewing ? "current" : ""}`}>
 								<button
 									type="button"
 									className="book-check"
@@ -487,7 +505,21 @@ function BooksSection({
 									<span className="lore-meta">{t("{n} 条条目", { n: b.entryCount })}</span>
 									{mounted && <span className="lore-meta book-mounted-tag">{t("已挂")}</span>}
 								</button>
-								<span className="book-acts">
+								<button
+									type="button"
+									className={`book-more-btn ${actionBook === b.path ? "active" : ""}`}
+									title={actionBook === b.path ? t("收起操作") : t("更多操作")}
+									aria-label={t("更多操作")}
+									onClick={(ev) => {
+										ev.stopPropagation();
+										setActionBook(actionBook === b.path ? null : b.path);
+									}}
+								>
+									<IconMore size={16} />
+								</button>
+							</div>
+							{actionBook === b.path && (
+								<div className="book-actions-bar">
 									<button type="button" className="act" onClick={() => void exportBook(b.path)}>
 										{t("导出")}
 									</button>
@@ -496,9 +528,10 @@ function BooksSection({
 											{t("删除")}
 										</ConfirmButton>
 									)}
-								</span>
-							</div>
-						);
+								</div>
+							)}
+						</div>
+					);
 					})}
 					<div className={`book-row ${viewingAgent ? "current" : ""}`}>
 						<button type="button" className="book-pick book-pick-full" onClick={() => onView({ kind: "agent" })}>
@@ -583,7 +616,7 @@ function BooksSection({
 	);
 }
 
-export function LorebookPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
+export function LorebookPanel({ toast, onOpenDetail }: { toast: (level: "info" | "warning" | "error", text: string) => void; onOpenDetail?: (entry: LoreEntryView, scopePath: string) => void }) {
 	const [view, setView] = useState<ViewTarget | null>(null);
 	const viewKey = view?.kind === "file" ? `file:${view.path}` : view?.kind === "agent" ? "agent" : "none";
 
@@ -862,6 +895,7 @@ export function LorebookPanel({ toast }: { toast: (level: "info" | "warning" | "
 								onToggle={toggle}
 								onPatch={patch}
 								onDelete={removeEntry}
+									onOpenDetail={onOpenDetail ? (entry) => onOpenDetail(entry, scopePath) : undefined}
 							/>
 						))}
 						{filtered.length > limit && (

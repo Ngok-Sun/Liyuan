@@ -45,6 +45,8 @@ export interface DeclareEntry {
 	where: "before" | "after" | "depth";
 	chars: number;
 	station: DeclareStation;
+	/** 编译片段指纹；只有实际声明且内容未变的条目才能复用 */
+	sourceHash?: string;
 	/** 模型给的一句理由（过目用，≤30 字） */
 	note?: string;
 }
@@ -85,13 +87,12 @@ export const assembleForDeclare = (
 const STATION_DEFINITIONS: Record<DeclareStation, string> = {
 	identity: "设定「你是谁」：身份/人格/作家扮演、破限信件、内容边界共识、反审查声明",
 	writing:
-		"写给模型照着写正文的规则：文风、描写边界、禁词表、对白规则、转述/承接规则、nsfw 准则、字数要求",
-	thinking: "规定模型怎么思考：思考模板、思考量要求、思考容器标签、逐项自检清单、思维链开头/收尾",
-	draft: "规定正文落笔方式：分段草稿/排练注释（如段前 HTML 注释）、改稿仪式",
-	output:
-		"规定输出结构：格式模块顺序、正文包裹标签、状态栏/选项/摘要等每拍附加输出的规格、反审查输出仪式",
-	memory: "要求每拍输出摘要/关键记忆/事件记录供前端留存（自建记忆系统）",
-	wrapper: "包裹卡内容槽位的开闭标签、分节标题、加载演出（如 [World Loading...]）",
+		"正文写作规则：文风、描写边界、禁词表、对白与转述规则、nsfw 准则、字数要求。若混合了思考/自检或步骤说明，只要指导正文写作，一律归入 writing 保留",
+	thinking: "纯思考协议：思考模板、思考量要求、思考容器标签、逐项自检清单、思维链开头/收尾",
+	draft: "纯草稿协议：分段草稿/排练注释（如段前 HTML 注释）、改稿仪式",
+	output: "纯输出合约或引擎控制：格式模块顺序、正文包裹标签、状态栏/选项/摘要等每拍附加输出的规格、运行时接管协议",
+	memory: "纯记忆记账：要求每拍输出摘要/关键记忆/事件记录供前端留存（自建记忆系统）",
+	wrapper: "纯材料包装：包裹卡内容槽位的开闭标签、分节标题、加载演出（如 [World Loading...]）",
 };
 
 export function buildDeclarePrompt(
@@ -101,28 +102,31 @@ export function buildDeclarePrompt(
 	const segments = pieces
 		.map(
 			(p, i) =>
-				`⟦片段${i + 1}｜${p.id}｜${p.role}｜${p.where === "before" ? "历史前" : p.where === "after" ? "历史后" : "深度注入"}｜${p.name}⟧\n${p.text}`,
+				`⟦${i + 1}｜${p.role}｜${p.where === "before" ? "历史前" : p.where === "after" ? "历史后" : "深度注入"}｜${p.name}⟧\n${p.text}`,
 		)
 		.join("\n\n");
 
 	const systemPrompt = [
-		"你分析角色扮演预设的结构。输入是一份预设经引擎编译后的线性提示词，已按来源块切成分段，每段头部带 ⟨标识符｜角色｜位置｜块名⟩。",
+		"你分析角色扮演预设的结构。输入是引擎编译后的分段提示词，每段头部为 ⟦编号｜角色｜位置｜块名⟧。",
 		"",
 		"给每个分段声明一个站点类别，判据：",
 		...STATIONS.map((s) => `- ${s}：${STATION_DEFINITIONS[s]}（去向：${STATION_META[s].dest}）`),
 		"",
 		"规则：",
 		"- 破限与身份类内容一律 identity，不做取舍。",
+		"- 正文写作规则一律 writing；若分段混有思考、自检或步骤说明，只要包含指导正文写作的要求，一律保留为 writing。",
 		"- 拿不准的分段一律 writing（保守保留）。",
+		"- 只有纯粹的机制段（纯思考模板、纯草稿排练、纯格式输出包裹、纯自建记忆）才归入对应停用类别。",
 		"- 只分类，不评价、不改写分段内容。",
-		"- 位置与角色只是信号，不是判据本身。",
 		"",
-		"输出 JSON 数组，逐段一项，不要输出其他文字：",
-		'[{"id":"<标识符>","station":"<类别>","note":"<不超过20字的理由>"}]',
+		"输出 JSON 数组，id 为段头编号（整数），逐段一项：",
+		'[{"id":1,"station":"<类别>","note":"<不超过20字的理由>"}]',
 	].join("\n");
 
 	const userText = [
 		`预设「${meta.preset}」。分段内容如下（⟦…⟧ 标记行是分度信息，不属于分段正文）：`,
+		"",
+		`输入共 ${pieces.length} 个分段，请逐段输出，从 1 到 ${pieces.length}，不要遗漏：`,
 		"",
 		segments,
 	].join("\n");
@@ -136,8 +140,10 @@ export interface ParseDeclareResult {
 	entries: DeclareEntry[];
 	/** 模型实际声明了几个（对齐 pieces 后） */
 	declared: number;
-	/** 没被声明、按保守规则落 writing 的标识符 */
+	/** 没被有效声明、按保守规则落 writing 的标识符 */
 	defaulted: string[];
+	/** 响应协议错误；不能当作成功声明留档 */
+	errors: string[];
 }
 
 const extractJsonArray = (text: string): unknown[] | null => {
@@ -153,24 +159,62 @@ const extractJsonArray = (text: string): unknown[] | null => {
 	}
 };
 
+export function declarePieceHash(piece: DeclarePiece): string {
+	return createHash("sha256")
+		.update(JSON.stringify(["block-v1", piece.id, piece.name, piece.role, piece.where, piece.text]))
+		.digest("hex");
+}
+
 export function parseDeclareResponse(text: string, pieces: DeclarePiece[]): ParseDeclareResult {
-	const raw = extractJsonArray(text) ?? [];
-	const byId = new Map<string, { station?: unknown; note?: string }>();
-	for (const item of raw) {
-		if (!item || typeof item !== "object") continue;
+	const raw = extractJsonArray(text);
+	const errors: string[] = raw ? [] : ["响应不是有效 JSON 数组"];
+	const expected = new Set(pieces.map((p) => p.id));
+	const byId = new Map<string, { station: DeclareStation; note?: string }>();
+	const seen = new Set<string>();
+
+	for (const item of raw ?? []) {
+		if (!item || typeof item !== "object") {
+			errors.push("声明项不是对象");
+			continue;
+		}
 		const o = item as Record<string, unknown>;
-		const id = typeof o.id === "string" ? o.id : typeof o.identifier === "string" ? o.identifier : "";
-		if (!id) continue;
-		byId.set(id, {
-			station: o.station,
-			note: typeof o.note === "string" ? o.note.slice(0, 60) : undefined,
-		});
+		// 鲁棒 ID 解析：支持整数 1..N、字符串 "片段N" / "N"、以及原 UUID/标识符
+		let id: string | undefined;
+		if (typeof o.id === "number" && Number.isInteger(o.id) && o.id >= 1 && o.id <= pieces.length) {
+			id = pieces[o.id - 1]?.id;
+		} else if (typeof o.id === "string") {
+			const m = o.id.trim().match(/^(?:片段\s*)?(\d+)$/);
+			if (m) {
+				const idx = parseInt(m[1], 10);
+				if (idx >= 1 && idx <= pieces.length) id = pieces[idx - 1]?.id;
+			} else if (expected.has(o.id)) {
+				id = o.id;
+			}
+		} else if (typeof o.identifier === "string" && expected.has(o.identifier)) {
+			id = o.identifier;
+		}
+
+		if (!id || !expected.has(id)) {
+			errors.push(`未知声明编号：${String(o.id ?? o.identifier)}`);
+			continue;
+		}
+		if (seen.has(id)) {
+			byId.delete(id);
+			errors.push(`重复声明：${id}`);
+			continue;
+		}
+		seen.add(id);
+		if (!isDeclareStation(o.station)) {
+			errors.push(`无效站点：${id}`);
+			continue;
+		}
+		byId.set(id, { station: o.station, note: typeof o.note === "string" ? o.note.slice(0, 60) : undefined });
 	}
+
 	const entries: DeclareEntry[] = [];
 	const defaulted: string[] = [];
 	for (const p of pieces) {
 		const hit = byId.get(p.id);
-		const station = hit && isDeclareStation(hit.station) ? hit.station : "writing";
 		if (!hit) defaulted.push(p.id);
 		entries.push({
 			identifier: p.id,
@@ -178,11 +222,64 @@ export function parseDeclareResponse(text: string, pieces: DeclarePiece[]): Pars
 			role: p.role,
 			where: p.where,
 			chars: p.text.length,
-			station,
+			station: hit?.station ?? "writing",
 			note: hit?.note,
+			...(hit ? { sourceHash: declarePieceHash(p) } : {}),
 		});
 	}
-	return { entries, declared: entries.length - defaulted.length, defaulted };
+	return { entries, declared: entries.length - defaulted.length, defaulted, errors };
+}
+
+export interface DeclareAttempt {
+	ids: string[];
+	response?: string;
+	error?: string;
+	declared: number;
+	defaulted: string[];
+	errors: string[];
+}
+
+export type DeclareText = (
+	systemPrompt: string,
+	userText: string,
+	opts: { maxTokens: number; reasoning: "off"; signal: AbortSignal },
+) => Promise<string | { error: string }>;
+
+/** 一次声明；协议缺项只补问一次。只返回模型有效声明，保守兜底绝不进入成功缓存。 */
+export async function runPresetDeclaration(
+	pieces: DeclarePiece[],
+	meta: { preset: string },
+	runText: DeclareText,
+): Promise<{ entries: DeclareEntry[]; pending: string[]; attempts: DeclareAttempt[]; error?: string }> {
+	const known = new Map<string, DeclareEntry>();
+	const attempts: DeclareAttempt[] = [];
+	const signal = AbortSignal.timeout(600_000);
+	let error: string | undefined;
+
+	for (let n = 0; n < 2; n++) {
+		const missing = pieces.filter((p) => !known.has(p.id));
+		if (!missing.length) break;
+		const prompt = buildDeclarePrompt(missing, meta);
+		let response: string | { error: string };
+		try {
+			response = await runText(prompt.systemPrompt, prompt.userText, { maxTokens: 16384, reasoning: "off", signal });
+		} catch (e) {
+			response = { error: e instanceof Error ? e.message : String(e) };
+		}
+		if (typeof response !== "string") {
+			error = response.error;
+			attempts.push({ ids: missing.map((p) => p.id), error, declared: 0, defaulted: missing.map((p) => p.id), errors: [] });
+			break; // 网络/额度错误交回既有退避，不立即重烧一次。
+		}
+		const parsed = parseDeclareResponse(response, missing);
+		attempts.push({ ids: missing.map((p) => p.id), response, declared: parsed.declared, defaulted: parsed.defaulted, errors: parsed.errors });
+		if (!parsed.errors.length) {
+			for (const e of parsed.entries) if (e.sourceHash) known.set(e.identifier, e);
+		}
+		error = parsed.errors.join("；") || (parsed.defaulted.length ? `缺少 ${parsed.defaulted.length} 段有效声明` : undefined);
+	}
+	const pending = pieces.filter((p) => !known.has(p.id)).map((p) => p.id);
+	return { entries: [...known.values()], pending, attempts, ...(pending.length ? { error: error ?? "声明未完成" } : {}) };
 }
 
 /** 用户过目后的声明同样走这里归一（改错的站别落 writing，多余的条目忽略） */

@@ -153,4 +153,10 @@ export const server: Record<string, string> = {
 	"已恢复文件并回到那次输入之前。": "Files restored and returned to before that input.",
 	"已恢复文件；讨论不变。": "Files restored; the discussion is unchanged.",
 	"子项目不存在（或当前卡不在 cards/）": "Project not found (or the current card is not under cards/)",
+	"保存检查点": "saving a checkpoint",
+	"手动存档": "Manual save",
+	"已保存检查点「{name}」": "Saved checkpoint “{name}”",
+	"回退检查点": "restoring a checkpoint",
+	"尚无检查点可回退": "No checkpoints available to restore",
+	"已恢复文件并回到「{name}」之前": "Files restored and returned to before “{name}”",
 };

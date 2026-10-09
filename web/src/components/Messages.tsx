@@ -759,10 +759,53 @@ export function Bubble({
 		return <HtmlFrame html={msg.html} title={msg.text} scripts={msg.scripts === true} />;
 	}
 	if (msg.channel === "authoring") {
-		return <div className="msg msg-authoring">
-			<div className="msg-head"><span className="msg-name">{msg.mode === "agent" ? "agent" : t("工作")}</span>{msg.unfinished && <span className="chip chip-unfinished">{t("已停止")}</span>}</div>
-			{msg.segments?.length || msg.timeline?.length ? <TurnTimeline segments={msg.segments ?? msg.timeline!} plain /> : <>{msg.thinking && <ThinkingBlock text={msg.thinking} />}<Paragraphs text={msg.text} /></>}
-		</div>;
+		const hasActions = !!(onReroll || onEdit || onRewind || onDelete || onCopy || onStore);
+		return (
+			<div className="msg msg-authoring">
+				<div className="msg-head">
+					<span className="msg-name">{msg.mode === "agent" ? "agent" : t("工作")}</span>
+					{msg.unfinished && <span className="chip chip-unfinished">{t("已停止")}</span>}
+					{floor !== undefined && <span className="floor">#{floor}</span>}
+				</div>
+				{msg.segments?.length || msg.timeline?.length ? (
+					<TurnTimeline segments={msg.segments ?? msg.timeline!} plain />
+				) : (
+					<>
+						{msg.thinking && <ThinkingBlock text={msg.thinking} />}
+						<Paragraphs text={msg.text} />
+					</>
+				)}
+				{hasActions && (
+					<div className="msg-actions">
+						{onRewind && (
+							<button className="act" onClick={onRewind} title={t("文件和讨论一起回退到该轮之前")}>
+								<IconUndo size={13} /> {t("回退")}
+							</button>
+						)}
+						{onEdit && (
+							<button className="act" onClick={onEdit} title={t("重新编辑本轮")}>
+								<IconEdit size={13} /> {t("修改")}
+							</button>
+						)}
+						{onStore && (
+							<button className="act" onClick={onStore} title={t("保存当前检查点快照")}>
+								<IconPin size={13} /> {t("存档")}
+							</button>
+						)}
+						{onDelete && (
+							<button className="act" onClick={onDelete} title={t("删除本轮讨论回复")}>
+								<IconTrash size={13} /> {t("删除")}
+							</button>
+						)}
+						{onCopy && (
+							<button className="act" onClick={() => onCopy(msg.text)} title={t("复制正文")}>
+								<IconCopy size={13} /> {t("复制")}
+							</button>
+						)}
+					</div>
+				)}
+			</div>
+		);
 	}
 	if (msg.channel === "backstage") {
 		// 戏外回复（助手答疑/办事）：排版明确区隔于叙事（PLAN-PHASE3 §6.1 显示通道）

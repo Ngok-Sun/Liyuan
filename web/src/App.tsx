@@ -45,11 +45,15 @@ import { registerLiyuanToast, registerTavernChatBridge } from "./tavernShim.ts";
 import { syncCardRuntimeVariables } from "./cardRuntimeFrames.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
 import { getTheme, setTheme } from "./theme.ts";
+import { getWallpaperConfig, type WallpaperConfig } from "./themes.ts";
 import { syncLocaleFromConfig, t, useLocale } from "./i18n/index.ts";
 import {
 	IconApi,
 	IconAttach,
 	IconPlus,
+	IconPin,
+	IconUndo,
+	IconPalette,
 	IconBell,
 	IconCard,
 	IconChevronDown,
@@ -76,6 +80,8 @@ import {
 	IconWorldline,
 } from "./components/icons.tsx";
 import { LorebookPanel } from "./components/LorebookPanel.tsx";
+import { LoreDetailCenter } from "./components/LoreDetailCenter.tsx";
+import type { LoreEntryView } from "./api.ts";
 import {
 	BackstageGroup,
 	Bubble,
@@ -109,6 +115,7 @@ import { ScriptHost } from "./components/ScriptHost.tsx";
 import { SessionsPanel, NewProjectBox, nextProjectName } from "./components/SessionsPanel.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { AboutPanel } from "./components/AboutPanel.tsx";
+import { ThemePanel } from "./components/ThemePanel.tsx";
 import { SessionStatsBar, StatusStrip } from "./components/StatusStrip.tsx";
 import { UploadsPanel } from "./components/UploadsPanel.tsx";
 import { StoreModal, WorldlinePanel } from "./components/WorldlinePanel.tsx";
@@ -169,6 +176,7 @@ type PanelId =
 	| "lorebook"
 	| "roster"
 	| "uploads"
+	| "theme"
 	| "status";
 
 /** agent 自建面板的右栏选择 id（柱 2）：`agent:` + 面板名，页签随 panels 帧动态长出 */
@@ -181,7 +189,7 @@ const agentId = (name: string): AgentPanelId => `agent:${name}`;
  * 判据只有一条：**换一个会话它还在不在**。在＝资产/配置，进抽屉；不在＝这一场戏的
  * 运行时状态，留聊天面或会话树。以后新面板往哪放照这条问，不必一事一议。
  */
-const DRAWER_SECTIONS: PanelId[] = ["roles", "connect", "preset", "lorebook", "powers", "uploads"];
+const DRAWER_SECTIONS: PanelId[] = ["roles", "connect", "preset", "lorebook", "powers", "theme", "uploads"];
 /** 抽屉可开全集＝轨位 + 轨底的设置与关于 */
 const DRAWER_PANELS: PanelId[] = [...DRAWER_SECTIONS, "settings", "about"];
 /** 右栏可开面板：状态栏 / 世界线 / 登场名录 / 会话树 / agent 面板（桌面端平立分栏，会话左移） */
@@ -210,6 +218,7 @@ const PANEL_LABEL: Record<PanelId, string> = {
 	lorebook: "世界书", // i18n-ignore
 	roster: "登场名录", // i18n-ignore
 	uploads: "资料", // i18n-ignore
+	theme: "主题", // i18n-ignore
 	status: "状态栏", // i18n-ignore
 };
 const panelLabel = (id: PanelId | string | null | undefined): string => (id && id in PANEL_LABEL ? t(PANEL_LABEL[id as PanelId]) : "");
@@ -227,6 +236,7 @@ const PANEL_ICON: Record<PanelId, (p: { size?: number }) => React.JSX.Element> =
 	lorebook: IconLorebook,
 	roster: IconRoster,
 	uploads: IconUploads,
+	theme: IconPalette,
 	status: IconStatus,
 };
 
@@ -295,6 +305,15 @@ export default function App() {
 	/** 本轮过程步骤（实时清单渲染用；与 turnActsRef 同内容） */
 	const [liveActs, setLiveActs] = useState<WireActivity[]>([]);
 	const [toasts, setToasts] = useState<Toast[]>([]);
+	const [wallpaper, setWallpaper] = useState<WallpaperConfig | null>(() => getWallpaperConfig());
+	useEffect(() => {
+		const handler = (e: Event) => {
+			const custom = e as CustomEvent<WallpaperConfig | null>;
+			setWallpaper(custom.detail);
+		};
+		window.addEventListener("liyuan:wallpaper-change", handler);
+		return () => window.removeEventListener("liyuan:wallpaper-change", handler);
+	}, []);
 	// 在线更新：WS update 帧驱动；modal 开关与 ready 气泡的本次会话收起标记
 	const [updateInfo, setUpdateInfo] = useState<UpdateWire | null>(null);
 	const [updateModalOpen, setUpdateModalOpen] = useState(false);
@@ -335,6 +354,7 @@ export default function App() {
 	/** 悬浮窗当前显示的面板（与左右栏并列的第三种形态，同时只开一个） */
 	const [floatPanel, setFloatPanel] = useState<PanelId | AgentPanelId | null>(null);
 	const [studioOpen, setStudioOpen] = useState(false);
+		const [centerLoreDetail, setCenterLoreDetail] = useState<{ entry: LoreEntryView; scopePath: string } | null>(null);
 	const [dark, setDark] = useState(() => getTheme() === "dark");
 	/** 悬浮窗「刷新」用：+1 强制重挂载窗内面板（与侧栏 manualTick 同机制） */
 	const [floatTick, setFloatTick] = useState(0);
@@ -1164,14 +1184,23 @@ export default function App() {
 		return out;
 	}, [numbered]);
 
+	const isAgentMode = conversationMode === "agent";
 	const lastNarrativeIdx = useMemo(() => {
-		for (let i = messages.length - 1; i >= 0; i--) if (messages[i].channel === "narrative") return i;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (isAgentMode) {
+				if (messages[i].channel === "authoring") return i;
+			} else {
+				if (messages[i].channel === "narrative") return i;
+			}
+		}
 		return -1;
-	}, [messages]);
+	}, [messages, isAgentMode]);
 	const lastUserIdx = useMemo(() => {
-		for (let i = messages.length - 1; i >= 0; i--) if (messages[i].channel === "user" && messages[i].mode === undefined && !messages[i].backstage) return i;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (messages[i].channel === "user" && (isAgentMode || (messages[i].mode === undefined && !messages[i].backstage))) return i;
+		}
 		return -1;
-	}, [messages]);
+	}, [messages, isAgentMode]);
 	/** 本轮用户输入之后是否已有定稿角色回复（有则隐藏空的「生成中」壳，避免双泡） */
 	const turnHasCommittedReply = useMemo(() => {
 		let lastStoryUser = -1;
@@ -1257,29 +1286,73 @@ export default function App() {
 		el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 	};
 
+	const saveAgentCheckpoint = useCallback((defaultMsg?: string) => {
+		if (busy) return;
+		const inputMsg = window.prompt(t("请输入检查点存档说明（可选）："), defaultMsg || "");
+		if (inputMsg === null) return;
+		const name = inputMsg.trim() || t("手动存档");
+		ws.send({ type: "story_checkpoint", message: name });
+	}, [busy, ws]);
+
+	const rewindAgentTurn = useCallback(() => {
+		if (busy) return;
+		if (!storyCheckpoints || storyCheckpoints.length === 0) {
+			pushToast("warning", t("尚无检查点可回退"));
+			return;
+		}
+		const latest = storyCheckpoints[storyCheckpoints.length - 1];
+		if (!latest) return;
+		const q = t("文件和讨论一起回退到「{msg}」之前？\n撤销本轮改动，讨论也将回到该轮输入之前。", { msg: latest.message });
+		if (window.confirm(q)) {
+			ws.send({ type: "story_restore", checkpointId: latest.id, scope: "both" });
+		}
+	}, [busy, storyCheckpoints, ws, pushToast]);
+
 	const send = useCallback(() => {
 		const typed = input.trim();
 		// 附件随消息：路径清单作为尾行附在正文后（这一行即持久记录，重放同路径解析）
 		const attachLine = pending.length > 0 ? buildAttachmentLine(pending.map((p) => p.file)) : "";
 		const text = attachLine ? (typed ? `${typed}\n${attachLine}` : attachLine) : typed;
 		if (!text) return;
-		if (/^\/store\s*$/i.test(typed) && pending.length === 0) {
-			setWelcome(false);
-			setAtHome(false);
-			touchVisit();
-			openStoreModal();
-			setInput("");
-			setPending([]);
-			return;
-		}
-		if (/^\/line\s*$/i.test(typed) && pending.length === 0) {
-			setWelcome(false);
-			setAtHome(false);
-			touchVisit();
-			toggleRight("worldline");
-			setInput("");
-			setPending([]);
-			return;
+		if (conversationMode === "agent") {
+			const saveMatch = /^\/(?:save|store)(?:\s+(.*))?$/i.exec(typed);
+			if (saveMatch && pending.length === 0) {
+				setWelcome(false);
+				setAtHome(false);
+				touchVisit();
+				saveAgentCheckpoint(saveMatch[1]);
+				setInput("");
+				setPending([]);
+				return;
+			}
+			if (/^\/(?:restore|back)\s*$/i.test(typed) && pending.length === 0) {
+				setWelcome(false);
+				setAtHome(false);
+				touchVisit();
+				rewindAgentTurn();
+				setInput("");
+				setPending([]);
+				return;
+			}
+		} else {
+			if (/^\/store\s*$/i.test(typed) && pending.length === 0) {
+				setWelcome(false);
+				setAtHome(false);
+				touchVisit();
+				openStoreModal();
+				setInput("");
+				setPending([]);
+				return;
+			}
+			if (/^\/line\s*$/i.test(typed) && pending.length === 0) {
+				setWelcome(false);
+				setAtHome(false);
+				touchVisit();
+				toggleRight("worldline");
+				setInput("");
+				setPending([]);
+				return;
+			}
 		}
 		let sent: boolean;
 		if (/^\/compact(?:\s|$)/i.test(typed) && pending.length === 0) {
@@ -1301,7 +1374,7 @@ export default function App() {
 		atBottomRef.current = true;
 		setAtBottom(true);
 		if (inputRef.current) inputRef.current.style.height = "auto";
-	}, [input, pending, ws, openStoreModal, pushToast, toggleRight]);
+	}, [input, pending, ws, openStoreModal, pushToast, toggleRight, conversationMode, saveAgentCheckpoint, rewindAgentTurn]);
 
 
 	// 卡 HTML（如 某卡 开场表单）调用 triggerSlash(`/send …|/trigger`)
@@ -1479,17 +1552,27 @@ export default function App() {
 		}
 	}, [input, commands]);
 
+	const activeCommands = useMemo(() => {
+		if (!commands) return [];
+		return commands.filter((c) => {
+			if (conversationMode === "agent") {
+				return c.mode === "agent" || c.mode === "all";
+			}
+			return c.mode === "roleplay" || c.mode === "all" || !c.mode;
+		});
+	}, [commands, conversationMode]);
+
 	const suggestions = useMemo(() => {
 		const m = /^\/(\w*)$/.exec(input);
-		if (!m || cmdDismissed || !commands) return [];
-		return commands.filter((c) => c.name.startsWith(m[1]));
-	}, [input, commands, cmdDismissed]);
+		if (!m || cmdDismissed || !activeCommands.length) return [];
+		return activeCommands.filter((c) => c.name.startsWith(m[1]));
+	}, [input, activeCommands, cmdDismissed]);
 
 	const argHint = useMemo(() => {
 		const m = /^\/(\w+)\s/.exec(input);
-		if (!m || !commands) return null;
-		return commands.find((c) => c.name === m[1]) ?? null;
-	}, [input, commands]);
+		if (!m || !activeCommands.length) return null;
+		return activeCommands.find((c) => c.name === m[1]) ?? null;
+	}, [input, activeCommands]);
 
 	const completeCmd = (c: CommandMeta) => {
 		setInput(c.takesArgs ? `/${c.name} ` : `/${c.name}`);
@@ -1657,7 +1740,7 @@ export default function App() {
 					/>
 				);
 			case "lorebook":
-				return <LorebookPanel toast={pushToast} />;
+				return <LorebookPanel toast={pushToast} onOpenDetail={(entry, scopePath) => setCenterLoreDetail({ entry, scopePath })} />;
 			case "roster":
 				return <RosterPanel state={worldState} toast={pushToast} />;
 			case "status":
@@ -1674,6 +1757,8 @@ export default function App() {
 						}}
 					/>
 				);
+			case "theme":
+				return <ThemePanel toast={pushToast} />;
 		}
 	};
 
@@ -2050,6 +2135,17 @@ export default function App() {
 	return (
 		<PanelRefreshContext.Provider value={agentTick}>
 		<div className="app">
+			{wallpaper && (
+				<div
+					className="app-wallpaper-layer"
+					aria-hidden="true"
+					style={{
+						backgroundImage: `url("${wallpaper.url}")`,
+						opacity: wallpaper.opacity,
+						filter: wallpaper.blur > 0 ? `blur(${wallpaper.blur}px)` : "none",
+					}}
+				/>
+			)}
 			{/*
 			  * 页面级作者脚本宿主：卡/预设声明的悬浮球等常驻 UI 在此起跑，产物挂到父页 body。
 			  * 帧自身零尺寸不可见，放在这里只为跟着 App 的生命周期走（换卡即换帧、卸载即收 DOM）。
@@ -2437,40 +2533,53 @@ export default function App() {
 														: undefined
 												}
 												onRewind={
-													!busy &&
-													!msgEdit &&
-													b.msg.channel === "user" &&
-													!b.msg.backstage &&
-													storyUserIdxs.includes(b.idx)
-														? () => rewindToUser(b.idx)
+													!busy && !msgEdit
+														? isAgentMode
+															? b.idx === lastNarrativeIdx || b.idx === lastUserIdx
+																? rewindAgentTurn
+																: undefined
+															: b.msg.channel === "user" && !b.msg.backstage && storyUserIdxs.includes(b.idx)
+																? () => rewindToUser(b.idx)
+																: undefined
 														: undefined
 												}
 												onDelete={
 													!busy && !msgEdit
-														? b.msg.channel === "user" && b.idx === lastUserIdx
-															? deleteLastUserTurn
-															: b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
+														? isAgentMode
+															? b.idx === lastNarrativeIdx
 																? dropLastReply
-																: undefined
+																: b.idx === lastUserIdx
+																	? deleteLastUserTurn
+																	: undefined
+															: b.msg.channel === "user" && b.idx === lastUserIdx
+																? deleteLastUserTurn
+																: b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
+																	? dropLastReply
+																	: undefined
 														: undefined
 												}
 												onCopy={
-													b.msg.channel === "narrative" || b.msg.channel === "greeting" || b.msg.channel === "user"
+													b.msg.channel === "narrative" || b.msg.channel === "greeting" || b.msg.channel === "user" || b.msg.channel === "authoring"
 														? doCopy
 														: undefined
 												}
 												onStore={
-													!busy &&
-													!msgEdit &&
-													(b.msg.channel === "narrative" || b.msg.channel === "greeting") &&
-													(b.idx === lastNarrativeIdx || (greetingOnly && b.msg.channel === "greeting"))
-														? openStoreModal
+													!busy && !msgEdit
+														? isAgentMode
+															? b.idx === lastNarrativeIdx || b.idx === lastUserIdx
+																? () => saveAgentCheckpoint()
+																: undefined
+															: (b.msg.channel === "narrative" || b.msg.channel === "greeting") &&
+															  (b.idx === lastNarrativeIdx || (greetingOnly && b.msg.channel === "greeting"))
+																? openStoreModal
+																: undefined
 														: undefined
 												}
 												onTts={
 													!busy &&
 													!msgEdit &&
-													(b.msg.channel === "narrative" || b.msg.channel === "greeting" || b.msg.channel === "user")
+													!isAgentMode &&
+													(b.msg.channel === "narrative" || b.msg.channel === "greeting")
 														? doTts
 														: undefined
 												}
@@ -2597,6 +2706,18 @@ export default function App() {
 						const host = agentSplit ? pagesRef.current?.querySelector(".story-pane") : null;
 						return host ? createPortal(pane, host) : pane;
 					})()}
+						{centerLoreDetail && !mobileRef.current && (() => {
+							const detailNode = (
+								<LoreDetailCenter
+									entry={centerLoreDetail.entry}
+									scopePath={centerLoreDetail.scopePath}
+									onClose={() => setCenterLoreDetail(null)}
+									toast={pushToast}
+								/>
+							);
+							const host = agentSplit ? pagesRef.current?.querySelector(".story-pane") : null;
+							return host ? createPortal(detailNode, host) : detailNode;
+						})()}
 					</div>
 					<footer
 						className="composer"
@@ -2676,46 +2797,92 @@ export default function App() {
 								<IconPlus size={18} />
 							</button>
 							<div className={`composer-tools ${composerTools ? "open" : ""}`}>
-								{/* 会话已上移到顶栏右键（会话树），此处不再重复 */}
-								<button
-									type="button"
-									className={`dock-btn ${rightPanel === "worldline" ? "active" : ""}`}
-									title={t("世界线")}
-									aria-label={t("世界线")}
-									onClick={() => {
-										toggleRight("worldline");
-										setComposerTools(false);
-									}}
-								>
-									<IconWorldline size={18} />
-									<span className="composer-tool-label">{t("世界线")}</span>
-								</button>
-								<button
-									type="button"
-									className={`dock-btn ${rightPanel === "roster" ? "active" : ""}`}
-									title={t("登场名录")}
-									aria-label={t("登场名录")}
-									onClick={() => {
-										toggleRight("roster");
-										setComposerTools(false);
-									}}
-								>
-									<IconRoster size={18} />
-									<span className="composer-tool-label">{t("名录")}</span>
-								</button>
-								<button
-									type="button"
-									className="dock-btn"
-									title={t("上传图片/文件（也可拖入或粘贴）")}
-									aria-label={t("上传图片或文件")}
-									onClick={() => {
-										uploadInputRef.current?.click();
-										setComposerTools(false);
-									}}
-								>
-									<IconAttach size={18} />
-									<span className="composer-tool-label">{t("上传")}</span>
-								</button>
+								{conversationMode === "agent" ? (
+									<>
+										<button
+											type="button"
+											className="dock-btn"
+											title={t("为当前正文与讨论保存一个检查点快照")}
+											aria-label={t("保存检查点")}
+											onClick={() => {
+												saveAgentCheckpoint();
+												setComposerTools(false);
+											}}
+										>
+											<IconPin size={18} />
+											<span className="composer-tool-label">{t("存档")}</span>
+										</button>
+										<button
+											type="button"
+											className="dock-btn"
+											title={t("文件和讨论一起回退到上一轮输入之前")}
+											aria-label={t("回退本轮")}
+											onClick={() => {
+												rewindAgentTurn();
+												setComposerTools(false);
+											}}
+										>
+											<IconUndo size={18} />
+											<span className="composer-tool-label">{t("回退")}</span>
+										</button>
+										<button
+											type="button"
+											className="dock-btn"
+											title={t("上传图片/文件（也可拖入或粘贴）")}
+											aria-label={t("上传图片或文件")}
+											onClick={() => {
+												uploadInputRef.current?.click();
+												setComposerTools(false);
+											}}
+										>
+											<IconAttach size={18} />
+											<span className="composer-tool-label">{t("上传")}</span>
+										</button>
+									</>
+								) : (
+									<>
+										{/* 会话已上移到顶栏右键（会话树），此处不再重复 */}
+										<button
+											type="button"
+											className={`dock-btn ${rightPanel === "worldline" ? "active" : ""}`}
+											title={t("世界线")}
+											aria-label={t("世界线")}
+											onClick={() => {
+												toggleRight("worldline");
+												setComposerTools(false);
+											}}
+										>
+											<IconWorldline size={18} />
+											<span className="composer-tool-label">{t("世界线")}</span>
+										</button>
+										<button
+											type="button"
+											className={`dock-btn ${rightPanel === "roster" ? "active" : ""}`}
+											title={t("登场名录")}
+											aria-label={t("登场名录")}
+											onClick={() => {
+												toggleRight("roster");
+												setComposerTools(false);
+											}}
+										>
+											<IconRoster size={18} />
+											<span className="composer-tool-label">{t("名录")}</span>
+										</button>
+										<button
+											type="button"
+											className="dock-btn"
+											title={t("上传图片/文件（也可拖入或粘贴）")}
+											aria-label={t("上传图片或文件")}
+											onClick={() => {
+												uploadInputRef.current?.click();
+												setComposerTools(false);
+											}}
+										>
+											<IconAttach size={18} />
+											<span className="composer-tool-label">{t("上传")}</span>
+										</button>
+									</>
+								)}
 							</div>
 							<input
 								ref={uploadInputRef}

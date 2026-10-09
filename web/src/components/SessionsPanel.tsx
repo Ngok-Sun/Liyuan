@@ -109,9 +109,9 @@ function RenameBox({ initial, onDone }: { initial: string; onDone: (name: string
 }
 
 /** 新建项目弹窗（顶栏「新建项目」也用它，App.tsx 引用）：起名 ＋ 选形态（扮演 / agent，建项目时定，之后不切换） */
-export function NewProjectBox({ initial, busy, onDone }: { initial: string; busy: boolean; onDone: (name: string | null, mode?: "agent", greeting?: number) => void }) {
+export function NewProjectBox({ initial, defaultMode = "roleplay", busy, onDone }: { initial: string; defaultMode?: "roleplay" | "agent"; busy: boolean; onDone: (name: string | null, mode?: "agent", greeting?: number) => void }) {
 	const [value, setValue] = useState(initial);
-	const [mode, setMode] = useState<"roleplay" | "agent">("roleplay");
+	const [mode, setMode] = useState<"roleplay" | "agent">(defaultMode);
 	// agent 形态：卡的开场白可选一条落成稿子第一个文件（素材进稿子是用户的动作）；-1＝不落
 	const [greetings, setGreetings] = useState<CardResponse["greetings"] | null>(null);
 	const [greeting, setGreeting] = useState(-1);
@@ -424,21 +424,43 @@ export function SessionsPanel({
 		return matched.filter((s) => s.path !== cur.path && s.id !== cur.id);
 	}, [matched, sessions]);
 
+	const currentChat = useMemo(() => {
+		const curSession = sessions?.find((s) => s.current);
+		if (!curSession?.chatId || !chats) return null;
+		return chats.find((c) => c.id === curSession.chatId) ?? null;
+	}, [sessions, chats]);
+
+	const [filterMode, setFilterMode] = useState<"roleplay" | "agent">(() =>
+		currentChat?.mode === "agent" ? "agent" : "roleplay",
+	);
+
+	const prevChatIdRef = useRef<string | undefined>(undefined);
+	useEffect(() => {
+		if (currentChat && currentChat.id !== prevChatIdRef.current) {
+			prevChatIdRef.current = currentChat.id;
+			setFilterMode(currentChat.mode === "agent" ? "agent" : "roleplay");
+		}
+	}, [currentChat]);
+
+	const roleplayChats = useMemo(() => (chats ?? []).filter((c) => c.mode !== "agent"), [chats]);
+	const agentChats = useMemo(() => (chats ?? []).filter((c) => c.mode === "agent"), [chats]);
+	const activeChats = filterMode === "agent" ? agentChats : roleplayChats;
+
 	const grouped = useMemo(() => {
 		if (!chats) return null;
 		const byChat = new Map<string, WireSessionInfo[]>();
 		const rest: WireSessionInfo[] = [];
 		for (const s of matched) {
-			if (s.chatId && chats.some((c) => c.id === s.chatId)) {
+			if (s.chatId && activeChats.some((c) => c.id === s.chatId)) {
 				const arr = byChat.get(s.chatId);
 				if (arr) arr.push(s);
 				else byChat.set(s.chatId, [s]);
-			} else {
+			} else if (!s.chatId && filterMode === "roleplay") {
 				rest.push(s);
 			}
 		}
-		return { groups: chats.map((c) => ({ chat: c, list: byChat.get(c.id) ?? [] })), rest };
-	}, [chats, matched]);
+		return { groups: activeChats.map((c) => ({ chat: c, list: byChat.get(c.id) ?? [] })), rest };
+	}, [chats, matched, activeChats, filterMode]);
 
 	const currentChatId = sessions?.find((s) => s.current)?.chatId;
 	const currentHint = atHome ? t("点击进入当前对话") : t("再次点击回到主页");
@@ -586,6 +608,32 @@ export function SessionsPanel({
 					onEnter={() => void doSearch()}
 				/>
 			</div>
+
+				{/* 模式切签：扮演会话 vs 正文 Agent */}
+				{chats && chats.length > 0 && (
+					<div className="spv2-mode-tabs" role="tablist">
+						<button
+							type="button"
+							role="tab"
+							aria-selected={filterMode === "roleplay"}
+							className={`spv2-mode-tab ${filterMode === "roleplay" ? "active" : ""}`}
+							onClick={() => setFilterMode("roleplay")}
+						>
+							<span>{t("扮演会话")}</span>
+							<span className="spv2-mode-count">{roleplayChats.length}</span>
+						</button>
+						<button
+							type="button"
+							role="tab"
+							aria-selected={filterMode === "agent"}
+							className={`spv2-mode-tab ${filterMode === "agent" ? "active" : ""}`}
+							onClick={() => setFilterMode("agent")}
+						>
+							<span>{t("正文 Agent")}</span>
+							<span className="spv2-mode-count">{agentChats.length}</span>
+						</button>
+					</div>
+				)}
 
 			{/* 多选工具行 */}
 			{picking && (
@@ -759,6 +807,7 @@ export function SessionsPanel({
 			{naming && chats && (
 				<NewProjectBox
 					initial={nextProjectName(chats)}
+						defaultMode={filterMode}
 					busy={busy}
 					onDone={(name, mode, greeting) => {
 						setNaming(false);

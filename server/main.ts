@@ -2022,9 +2022,9 @@ const restHost: RestHost = {
 	},
 	/** 向量记忆：绑定当前角色卡 + 当前对话会话 */
 	memoryScope: () => memoryScopeFor(),
-	// 预设 AI 分拣等旁路声明：调当前会话模型做一次性判断（sideTextOnce，与跨会话记忆同步同一条）
+	// 预设声明与场记共用旁路模型选择；未配置旁路时才跟随剧情模型。
 	runSideText: (systemPrompt, userText, opts) =>
-		sideTextOnce(session.model as StageModelLike | undefined, systemPrompt, userText, {
+		sideTextOnce((sideEntryOf()?.model ?? session.model) as StageModelLike | undefined, systemPrompt, userText, {
 			maxTokens: opts?.maxTokens ?? 4096,
 			reasoning: opts?.reasoning ?? "off",
 			signal: opts?.signal,
@@ -2039,7 +2039,7 @@ let presetSyncChain: Promise<PresetSyncResult | undefined> = Promise.resolve(und
 const syncPresetNow = (reprocess = false): Promise<PresetSyncResult | undefined> => {
 	presetSyncChain = presetSyncChain.then(async () => {
 		try {
-			const cur = restHost.listModels().current;
+			const cur = sideEntryOf()?.model ?? restHost.listModels().current;
 			const { preset: r, lore } = await syncCardFiles(
 				cwd,
 				{
@@ -2863,6 +2863,73 @@ const handlePrompt = async (text: string) => {
 		return;
 	}
 
+	// agent 模式：/save 与 /restore 走检查点仓
+	if (stage?.mode === "agent") {
+		const saveMatch = /^\/(?:save|store)(?:\s+(.*))?$/i.exec(trimmed);
+		if (saveMatch) {
+			if (storyStreaming()) {
+				broadcast({ type: "notify", level: "warning", text: t("请等当前回复完成（或先停止），再{what}", { what: t("保存检查点") }) });
+				return;
+			}
+			const chatDir = agentChatDir();
+			if (!chatDir) return;
+			const msg = (saveMatch[1] ?? "").trim() || t("手动存档");
+			const cp = new StoryHistory(chatDir).commit({ author: "user", message: msg, force: true });
+			if (cp) {
+				const { files: _files, ...lite } = cp;
+				session.sessionManager.appendCustomEntry(STORY_CHECKPOINT_TYPE, lite);
+				session.sessionManager.flush();
+			}
+			resyncAll();
+			broadcast({ type: "notify", level: "info", text: t("已保存检查点「{name}」", { name: msg }) });
+			return;
+		}
+		const restoreMatch = /^\/(?:restore|back)\b/i.exec(trimmed);
+		if (restoreMatch) {
+			if (storyStreaming()) {
+				broadcast({ type: "notify", level: "warning", text: t("请等当前回复完成（或先停止），再{what}", { what: t("回退检查点") }) });
+				return;
+			}
+			const chatDir = agentChatDir();
+			if (!chatDir) return;
+			const history = new StoryHistory(chatDir);
+			const all = history.list();
+			const target = all[all.length - 1];
+			if (!target) {
+				broadcast({ type: "notify", level: "warning", text: t("尚无检查点可回退") });
+				return;
+			}
+			const both = !!target.turnId;
+			if (both) {
+				const branch = session.sessionManager.getBranch() as Array<{ id?: string; parentId?: string | null }>;
+				const at = branch.findIndex((e) => e.id === target.turnId);
+				if (at >= 0) {
+					const parent = branch[at]!.parentId ?? null;
+					if (parent !== session.sessionManager.getLeafId()) {
+						if (parent === null) session.sessionManager.resetLeaf();
+						else await session.navigateTree(parent, { summarize: false });
+					}
+				}
+			}
+			const idx = all.findIndex((c) => c.id === target.id);
+			const fileTarget = both ? all[idx - 1] : target;
+			let cp: Checkpoint | undefined;
+			if (fileTarget) cp = history.restore(fileTarget.id) ?? undefined;
+			else {
+				for (const f of listStoryFiles(storyDirectory(chatDir))) rmSync(join(storyDirectory(chatDir), f.name));
+			}
+			if (!cp && both) cp = history.commit({ author: "user", message: t("回到「{message}」之前", { message: target.message }), restoredFrom: target.id, force: true });
+			if (cp) {
+				const { files: _files, ...lite } = cp;
+				session.sessionManager.appendCustomEntry(STORY_CHECKPOINT_TYPE, lite);
+				session.sessionManager.flush();
+			}
+			resyncAll();
+			broadcast({ type: "notify", level: "info", text: t("已恢复文件并回到「{name}」之前", { name: target.message }) });
+			return;
+		}
+	}
+
 	// 只有已注册的命令可走命令通道。路径、// 与未知斜杠文本仍是当前模式的用户输入，
 	// 必须经过台上的上下文投影，不能落入裸 pi 生成。
 	// 与 AgentSession 的命令解析相同：命令名止于第一个 ASCII 空格。
@@ -3313,7 +3380,8 @@ wss.on("connection", (ws, req) => {
 						} else {
 							await runtime.newSession();
 						}
-						broadcast({ type: "notify", level: "info", text: t("已新建会话") });
+						broadcast(await listSessions());
+							broadcast({ type: "notify", level: "info", text: t("已新建会话") });
 						break;
 					case "story_restore": {
 						// docs/PLAN-AGENT-CODING.md §4.3：files＝只重写 正文/（讨论不动）；both＝再把讨论截到那轮输入之前。
@@ -3359,6 +3427,21 @@ wss.on("connection", (ws, req) => {
 						broadcast({ type: "notify", level: "info", text: both ? t("已恢复文件并回到那次输入之前。") : t("已恢复文件；讨论不变。") });
 						break;
 					}
+					case "story_checkpoint": {
+						if (refuseWhileStreaming(ws, t("保存检查点"))) return;
+						const chatDir = agentChatDir();
+						if (!chatDir) throw new Error(t("当前不是 agent 子项目"));
+						const msg = (frame.message ?? "").trim() || t("手动存档");
+						const cp = new StoryHistory(chatDir).commit({ author: "user", message: msg, force: true });
+						if (cp) {
+							const { files: _files, ...lite } = cp;
+							session.sessionManager.appendCustomEntry(STORY_CHECKPOINT_TYPE, lite);
+							session.sessionManager.flush();
+						}
+						resyncAll();
+						broadcast({ type: "notify", level: "info", text: t("已保存检查点「{name}」", { name: msg }) });
+						break;
+					}
 					case "chat_new_session": {
 						if (refuseWhileStreaming(ws, t("新建会话"))) return;
 						// 「第二个窗口继续聊」＝在指定子项目里再开一个会话。当前子项目：
@@ -3390,7 +3473,8 @@ wss.on("connection", (ws, req) => {
 							await bindSession();
 							resyncAll();
 						}
-						broadcast({ type: "notify", level: "info", text: t("已新建会话") });
+						broadcast(await listSessions());
+							broadcast({ type: "notify", level: "info", text: t("已新建会话") });
 						break;
 					}
 					case "ping":

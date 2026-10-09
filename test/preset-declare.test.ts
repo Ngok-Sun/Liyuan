@@ -73,7 +73,9 @@ test("buildDeclarePrompt：带标识符、站别判据与输出格式", () => {
 	assert.match(systemPrompt, /identity/);
 	assert.match(systemPrompt, /拿不准的分段一律 writing/);
 	assert.match(systemPrompt, /\{"id"/);
-	for (const id of ["main", "style", "w1", "w2", "cot", "fmt"]) assert.ok(userText.includes(id));
+	assert.match(systemPrompt, /id 为段头编号/);
+	assert.ok(!userText.includes("main"));
+	assert.match(userText, /⟦1｜system｜历史前｜身份⟧/);
 	assert.match(userText, /资深写手/);
 });
 
@@ -96,8 +98,10 @@ test("parseDeclareResponse：合法站别收下；未知站别落 writing；漏�
 	assert.equal(parsed.entries.find((e) => e.identifier === "fmt")?.station, "writing");
 	assert.equal(parsed.entries.find((e) => e.identifier === "main")?.station, "identity");
 	assert.equal(parsed.entries.find((e) => e.identifier === "cot")?.station, "thinking");
-	assert.deepEqual(parsed.defaulted, ["w2"]);
-	assert.equal(parsed.declared, 5);
+	assert.deepEqual(parsed.defaulted, ["w2", "fmt"]);
+	assert.equal(parsed.declared, 4);
+	assert.equal(parsed.errors.length, 1);
+	assert.equal(parsed.entries.find((e) => e.identifier === "fmt")?.sourceHash, undefined);
 });
 
 test("translatePresetWithDeclaration：逐块（预设）条目，机制段关闭条目；未启用块只入账不取内容", () => {

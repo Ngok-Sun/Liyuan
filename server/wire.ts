@@ -355,6 +355,8 @@ export type ClientFrame =
 	/** agent 模式：回退到写入该章的那一轮之后（之后的章随分支退掉，文件仍在；再写＝分叉） */
 	/** agent 模式：恢复到检查点。files＝只恢复文件；both＝文件和对话一起（截到那轮输入之前） */
 	| { type: "story_restore"; checkpointId: string; scope: "files" | "both" }
+	/** agent 模式：手动保存检查点快照 */
+	| { type: "story_checkpoint"; message?: string }
 	/** 两层布局：在指定子项目里再开一个会话（「第二个窗口继续聊」） */
 	| { type: "chat_new_session"; chatId: string }
 	| { type: "ping" }; // 保活，服务端丢弃

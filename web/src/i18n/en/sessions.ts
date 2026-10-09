@@ -96,6 +96,8 @@ export const sessions: Record<string, string> = {
 	"删除所选对话（不可恢复）": "Delete selected chats (cannot be undone)",
 	"删除所选 {n}": "Delete selected {n}",
 	"项目": "Projects",
+	"扮演会话": "Roleplay",
+	"正文 Agent": "Prose Agent",
 	"多选": "Select",
 	"搜索中…": "Searching…",
 	"命中 {n} 个对话": "{n} chat matched|{n} chats matched",

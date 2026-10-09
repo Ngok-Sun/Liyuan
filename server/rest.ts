@@ -145,14 +145,14 @@ import {
 	translateReport,
 } from "../src/user-rules.ts";
 import {
-	assembleForDeclare,
-	buildDeclarePrompt,
+	declarePieceHash,
+	isDeclareStation,
+	runPresetDeclaration,
 	buildProcessPrompt,
 	compiledPieces,
 	compilePreset,
 	declarePieces,
 	declareTranslateReport,
-	parseDeclareResponse,
 	parseProcessResponseWithError,
 	presetFingerprint,
 	processIntoEntries,
@@ -1305,7 +1305,7 @@ export async function syncPresetTranslation(
 	}
 	const card = loadCardFile(resolvePath(cwd, config.card));
 	const macro = { charName: card.name, userName: config.userName };
-	const pieces = declarePieces(assembleForDeclare(doc, macro));
+	const pieces = declarePieces(compilePreset(doc));
 
 	// 声明留档：全局一份（按块 identifier 命中就复用）；缺的才问模型
 	const declAbs = declarationPath(cwd, doc.name);
@@ -1330,40 +1330,40 @@ export async function syncPresetTranslation(
 			}
 		}
 	}
-	const known = new Map((stored?.entries ?? []).map((e) => [e.identifier, e]));
+	// 旧缓存可能把解析兜底当成功；没有内容指纹的条目不再冒充已声明。
+	const hashes = new Map(pieces.map((p) => [p.id, declarePieceHash(p)]));
+	const known = new Map((opts.reprocess ? [] : stored?.entries ?? [])
+		.filter((e) => isDeclareStation(e.station) && e.sourceHash && (!hashes.has(e.identifier) || e.sourceHash === hashes.get(e.identifier)))
+		.map((e) => [e.identifier, e]));
 	const missing = pieces.filter((p) => !known.has(p.id));
 	let declareError: string | undefined;
 	let declared = 0;
 	if (missing.length > 0) {
-		const key = doc.name;
+		const key = declAbs;
 		const failedAt = declareFailedAt.get(key) ?? 0;
-		if (Date.now() - failedAt < DECLARE_RETRY_MS) {
+		if (!opts.reprocess && Date.now() - failedAt < DECLARE_RETRY_MS) {
 			declareError = t("声明模型刚失败过，稍后再试");
 		} else {
-			const prompt = buildDeclarePrompt(missing, { preset: doc.name });
-			const resp = await deps.runSideText(prompt.systemPrompt, prompt.userText, {
-				maxTokens: 16384,
-				reasoning: "low",
-				signal: AbortSignal.timeout(600_000),
-			});
-			if (typeof resp === "string") {
-				declareFailedAt.delete(key);
-				const parsed = parseDeclareResponse(resp, missing);
-				for (const e of parsed.entries) known.set(e.identifier, e);
-				declared = parsed.entries.length;
-				const nextDecl: PresetDeclaration = {
-					version: 1,
-					preset: doc.name,
-					createdAt: new Date().toISOString(),
-					model: deps.modelLabel,
-					entries: [...known.values()],
-				};
-				mkdirSync(dirname(declAbs), { recursive: true });
-				writeFileSync(declAbs, JSON.stringify(nextDecl, null, "\t"), "utf8");
-			} else {
-				declareFailedAt.set(key, Date.now());
-				declareError = resp.error;
-			}
+			const result = await runPresetDeclaration(missing, { preset: doc.name }, deps.runSideText);
+			for (const e of result.entries) known.set(e.identifier, e);
+			declared = result.entries.length;
+			declareError = result.error;
+			if (result.pending.length) declareFailedAt.set(key, Date.now());
+			else declareFailedAt.delete(key);
+			const nextDecl: PresetDeclaration = {
+				version: 1,
+				preset: doc.name,
+				createdAt: new Date().toISOString(),
+				model: deps.modelLabel,
+				entries: [...known.values()],
+			};
+			mkdirSync(dirname(declAbs), { recursive: true });
+			writeFileSync(declAbs, JSON.stringify(nextDecl, null, "\t"), "utf8");
+			// 原始响应与解析结果分开留证；不写入任何送模文件。
+			writeFileSync(declAbs.replace(/\.json$/, ".response.json"), JSON.stringify({
+				preset: doc.name, model: deps.modelLabel, createdAt: nextDecl.createdAt,
+				pending: result.pending, attempts: result.attempts,
+			}, null, "\t"), "utf8");
 		}
 	} else if (lifted && stored) {
 		// 旧档整份命中（无需重问模型）：归一后落全局（剥掉旧形态的 card 字段），其余卡此后直接命中

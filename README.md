@@ -1,107 +1,108 @@
-# 梨园 Liyuan
+**English** · [简体中文](README_zh.md)
 
-**基于 pi 构建的 RP Agent**  
-Liyuan is an RP Agent built on pi, designed to bring coding agent capabilities into role-playing.
+# Liyuan (梨园)
 
-📖 **[使用文档](https://docs.liyuan.pro)** · 🚀 **[下载发布版](https://github.com/weidu12123/Liyuan/releases)**
+**An RP Agent built on pi, bringing coding agent superpowers to role-playing.**
 
-![梨园主界面](docs/images/home.png)
+📖 **[Documentation](https://docs.liyuan.pro)** · 🚀 **[Releases](https://github.com/weidu12123/Liyuan/releases)** · 🌐 **[Website](https://docs.liyuan.pro)**
 
----
-
-## 梨园是什么
-
-梨园是基于 pi 构建的 RP Agent，将 coding agent 的诸多能力 RP 化。目标是以 agent 架构解决传统 rp 项目的诸多问题，为用户带来更好的角色扮演体验。
+![Liyuan Main Interface](docs/images/home.png)
 
 ---
 
-## 梨园的 RP 化
+## What is Liyuan?
 
-梨园的整个创作思路可以被概括为 agent 的 RP 化，通过类比 coding agent 的诸多能力并将其 RP 化。
-
-| Coding Agent | 梨园 RP 化 |
-|---|---|
-| 项目文件夹（Workspace / cwd） | 角色卡独立空间（一卡一目录） |
-| 代码 | 剧情正文 |
-| 代码局部修改（Edit / Patch） | 局部定点改稿 |
-| 代码匹配工具（Grep / Search） | 文本匹配工具 |
-| 代码版本回退（Rewind / Checkpoint） | 稿件回滚与上一拍修订 |
-| 上下文压缩（Compact） | 剧情向压缩（前情提要） |
-| 跨会话记忆（Codex Memories） | 卡级记忆（复盘、合并与遗忘） |
-| 关键操作确认（Permission Gate） | 剧情分岔决策卡 |
-| 规则分层（SYSTEM.md / AGENTS.md） | 引擎协议与卡片世界法则 |
+**Liyuan** (梨园) is a next-generation Role-Play Agent built on top of [pi](https://github.com/earendil-works/pi). By reimagining coding agent primitives for creative storytelling and roleplay, Liyuan tackles the chronic limitations of traditional RP frontends—such as context bloat, setting drift, ungrounded hallucination, prompt clutter, and vendor lock-in—delivering an immersive, transparent, and deterministic role-playing experience.
 
 ---
 
-## 核心能力
+## The RP Paradigm: Coding Agent Primitives Reimagined
 
-### 1. 记忆能力
-- **纯净上下文与剧情压缩**：harness 确定性过滤过程数据，长篇对话按叙事逻辑汇总为前情提要。
-- **即时状态与登场名录**：旁路自动记账时间、地点、物品与人物在场状态，每拍锚定防止设定漂移。
-- **设定集按需检索**：世界书与知识库不占常驻窗口，模型在需要时主动按需检索设定原文。
-- **卡级跨会话记忆与遗忘**：局复盘自动合并沉淀为卡级记忆，删除对话同步触发事实的物理遗忘。
+Liyuan's core architecture translates proven software engineering agent paradigms directly into roleplay mechanics:
 
-![角色设定与登场名录状态](docs/images/character-detail-roster.png)
-
-### 2. 高度自定义
-- **提示词分层自定义**：开放 `SYSTEM.md`（引擎底层协议）与 `AGENTS.md`（角色世界法则），支持完全透明的文件化编辑与条目级开关。
-- **角色卡协同制作平台**：内置角色卡工坊与工作模式，支持用户与 Agent 在沙箱内协同编写、修改与测试卡片资源与前端脚本。
-
-![4:6 双轨角色卡工坊](docs/images/card-studio.png)
-
-### 3. 数据迁移性
-- **卡空间物理独立迁移**：每张卡作为一个完整工作空间，会话、状态与记忆物理聚合，单卡目录支持跨设备直接拷贝即用。
-- **通用数据资产导入导出**：支持标准角色卡、世界书与历史会话直接导入续玩，知识资产可自由导出为通用格式，无数据锁定。
-- **纯透明本地文件存储**：全量数据以明文 JSON 与 Markdown 落地，不依赖数据库黑盒，支持随时归档、备份与手动管理。
-
-### 4. 用户沉浸感
-- **关键岔口停笔共创**：关键剧情转折处主动调用 ask 工具征询，提供分支选项与自由输入，由用户决定故事走向。
-- **正文意图化修改与替换**：支持直接输入修改建议让 Agent 定向调整或替换最新正文，告别推翻整篇重新生成。
+| Coding Agent Primitive | Liyuan RP Equivalent | Description |
+|---|---|---|
+| **Workspace / cwd** | **Isolated Card Space** | One directory per character card, isolating assets, sessions, memory, and state |
+| **Code** | **Story Prose** | The narrative text treated as living creative output |
+| **Edit / Patch** | **In-Place Targeted Revisions** | Surgical prose edits and adjustments without regenerating entire paragraphs |
+| **Grep / Search** | **Text & Lore Retrieval** | On-demand search across lorebooks and past chapters without bloating context |
+| **Rewind / Checkpoint** | **Branch Rollback & Revision** | Non-destructive story branching and checkpoint restore for alternate storylines |
+| **Context Compaction** | **Narrative Compaction (Story Recap)** | Summarizing past chapters into faithful story recaps while keeping recent prose pristine |
+| **Cross-Session Memory** | **Card-Level Memory & Forgetting** | Per-card consolidation across sessions with synchronized physical forgetting |
+| **Permission Gate** | **Narrative Fork Decision Cards** | Interactive decision prompts (`ask` tool) at crucial plot junctures for user choice |
+| **SYSTEM.md / AGENTS.md** | **Engine Protocols & World Laws** | Fully transparent, file-based prompt layers with modular toggles |
 
 ---
 
-## 快速开始
+## Key Capabilities
 
-> 完整图文上手与界面详解请参阅 **[梨园使用文档 (docs.liyuan.pro)](https://docs.liyuan.pro)**。
+### 1. Advanced Memory Architecture
+- **Pristine Context & Narrative Compaction**: The harness deterministically filters intermediate thought processes and noise, compiling lengthy dialogues into coherent story recaps.
+- **Real-Time State Ledger & Cast Roster**: A sidecar ledger automatically tracks in-universe time, locations, items, and character presence to prevent setting drift across turns.
+- **On-Demand Lorebook Retrieval**: Worldbooks and knowledge bases remain outside the active prompt window until the model explicitly queries them, keeping the context window light and focused.
+- **Card-Level Cross-Session Memory & Physical Forgetting**: Session debriefs automatically merge into persistent card memory; deleting a conversation physically triggers true forgetting of associated facts.
 
-### 环境要求
+![Character Profile & Cast Roster](docs/images/character-detail-roster.png)
+
+### 2. High Customizability & Co-Creation
+- **Layered Prompt Architecture**: Exposes `SYSTEM.md` (engine protocol) and `AGENTS.md` (world rules and character lore) for transparent, file-level editing with entry-by-entry toggles.
+- **Collaborative Card Workshop & Sandbox**: Built-in card studio and work mode allow users and the Agent to co-author, debug, and preview character cards and custom front-end scripts in a secure sandbox.
+
+![Split-view Card Studio](docs/images/card-studio.png)
+
+### 3. Portability & Zero Vendor Lock-In
+- **Physically Portable Card Spaces**: Each card is an independent workspace containing its own sessions, state, and memory. Simply copy the card folder across machines and pick up right where you left off.
+- **Universal Format Support**: Full interoperability with standard Tavern / Character Card V2 & V3 formats, lorebooks, and chat histories without platform restrictions.
+- **Transparent Local File Storage**: All data is saved as plain text JSON and Markdown. Zero black-box databases—effortless backup, versioning, and inspection.
+
+### 4. Deep User Immersion
+- **Interactive Plot Junctions**: At pivotal narrative moments, the Agent uses the `ask` tool to present branching choices and free-form inputs, co-authoring the story with you.
+- **Intent-Driven Prose Editing**: Request subtle adjustments or line replacements directly, eliminating the need to discard and regenerate entire paragraphs.
+
+---
+
+## Quick Start
+
+> For complete visual guides and interface walkthroughs, see the **[Liyuan Documentation (docs.liyuan.pro)](https://docs.liyuan.pro)**.
+
+### Requirements
 - **Node.js ≥ 22**
-- 任一 OpenAI 兼容格式 API Key（如 DeepSeek 等）
+- Any OpenAI-compatible API key (e.g., DeepSeek, OpenAI, Claude via proxy, etc.)
 
-### 本地运行
+### Running Locally
 
 ```bash
-# 生成本地配置文件
+# Copy example configuration files
 cp liyuan.agent.example.json liyuan.agent.json
 cp liyuan.config.example.json liyuan.config.json
 
-# 编辑 liyuan.agent.json 填入 apiKey 与模型 ID
+# Edit liyuan.agent.json to set your apiKey, baseURL, and model ID
 
-# 安装依赖并启动
+# Install dependencies and start
 npm install
-npm run web:build    # 编译前端（已有 web/dist 可跳过）
-npm run web          # 启动服务
+npm run web:build    # Build frontend (can be skipped if web/dist already exists)
+npm run web          # Launch server
 ```
 
-- **Windows**：双击 `start.bat`
-- **Linux / macOS**：执行 `chmod +x start.sh && ./start.sh`
-- 浏览器访问 `http://127.0.0.1:7620`
+- **Windows**: Double-click `start.bat`
+- **Linux / macOS**: Run `chmod +x start.sh && ./start.sh`
+- Open `http://127.0.0.1:7620` in your browser.
 
-> 7620 端口服务默认无鉴权，请勿直接裸暴露至公网。公网访问请配置反向代理与身份验证。
+> **Security Note**: Port 7620 does not enforce authentication by default. Do not expose it directly to the public internet without a reverse proxy and authentication layer.
 
 ---
 
-## 部署
+## Deployment
 
-### Docker 运行
+### Docker Compose
 
 ```bash
 git clone --depth 1 https://github.com/weidu12123/Liyuan.git && cd Liyuan
 docker compose up -d --build
 ```
-数据与配置持久化保存于本地映射卷中。
+Data and configurations persist in local mapped volumes.
 
-也可直接拉预构建镜像，免去服务器构建：
+You can also use prebuilt multi-arch images directly from GHCR without building from source:
 
 ```bash
 mkdir -p liyuan && cd liyuan
@@ -111,29 +112,30 @@ docker compose up -d
 
 ---
 
-## 开发者
+## Architecture & Development
 
 ```
-领域层  src/                        角色卡、设定集、场记、记忆、世界线等业务逻辑
-接线层  .liyuan/extensions/roleplay.ts   pi 钩子与工具注册挂载
-Web 层  server/ + web/             服务端调度、WebSocket/REST 协议与前端页面
-内核层  packages/@liyuan/*         本地维护的 pi agent 核心库
+Domain Layer    src/                        Character cards, lorebooks, staging, memory, timelines
+Wiring Layer    .liyuan/extensions/roleplay.ts   pi extension hooks and tool registrations
+Web Layer       server/ + web/             Backend orchestration, WebSocket/REST protocols, and Web UI
+Core Layer      packages/@liyuan/*         Locally maintained pi agent core framework
 ```
 
-单元测试执行：
+Running unit tests:
 ```bash
 node --test test/*.test.ts
 ```
 
 ---
 
-## 许可证
+## License
 
-- 主项目采用 **[PolyForm Noncommercial 1.0.0](LICENSE)** 许可：个人与非商业用途可自由使用、修改与分发。任何商业用途需单独联系作者取得授权。
-- 内核代码基于 [pi](https://github.com/earendil-works/pi)（MIT 协议）二次开发，完整保留其原版权声明与许可。
+- The main project is licensed under the **[PolyForm Noncommercial 1.0.0](LICENSE)** license: Free for personal and non-commercial use, modification, and distribution. Any commercial use requires prior authorization from the author.
+- Core agent modules are derived from [pi](https://github.com/earendil-works/pi) (MIT License), maintaining all original copyright notices.
 
 ---
 
-## 友链
+## Community & Links
 
-[linux.do](https://linux.do)
+- **Documentation**: [docs.liyuan.pro](https://docs.liyuan.pro)
+- **Community Forum**: [linux.do](https://linux.do)

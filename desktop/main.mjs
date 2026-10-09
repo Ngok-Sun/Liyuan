@@ -62,6 +62,8 @@ const DESKTOP_EN = {
 	"检查更新失败。": "Update check failed.",
 	"{err}\n\n也可以到发布页手动下载新版。": "{err}\n\nYou can also download the new version from the releases page.",
 	"加载中…": "Loading…",
+	"基于 pi 构建的 RP Agent": "RP Agent built on pi",
+	"正在准备扮演…": "Preparing roleplay…",
 	"文件": "File",
 	"打开数据目录": "Open data folder",
 	"更改数据目录…": "Change data folder…",
@@ -487,15 +489,15 @@ function buildSplash() {
 			logoSrc = `data:image/png;base64,${fs.readFileSync(p).toString("base64")}`;
 		}
 	} catch {}
-	// 兜底 SVG：若万一未找到文件，保持相同尺寸与梨园朱砂花造型
+	// 兜底 SVG：若万一未找到文件，保持白瓷朱砂纯正风格
 	if (!logoSrc) {
 		logoSrc =
 			"data:image/svg+xml," +
 			encodeURIComponent(
 				`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">` +
-					`<rect width="64" height="64" rx="14" fill="#1e1a18"/>` +
-					`<path d="M32 10c-1 8-8 12-8 20 0 6 4 10 8 12 4-2 8-6 8-12 0-8-7-12-8-20z" fill="#c4bbb1"/>` +
-					`<path d="M22 42c4 6 10 8 10 8s6-2 10-8" stroke="#e25a3c" stroke-width="2.5" stroke-linecap="round"/>` +
+					`<rect width="64" height="64" rx="16" fill="#fffcfa" stroke="#ebe6df"/>` +
+					`<path d="M32 10c-1 8-8 12-8 20 0 6 4 10 8 12 4-2 8-6 8-12 0-8-7-12-8-20z" fill="#3d3833"/>` +
+					`<path d="M22 42c4 6 10 8 10 8s6-2 10-8" stroke="#bc4123" stroke-width="2.5" stroke-linecap="round"/>` +
 					`</svg>`,
 			);
 	}
@@ -503,18 +505,35 @@ function buildSplash() {
 		`<!doctype html><html lang="${uiLocale === "zh" ? "zh-CN" : "en"}"><head><meta charset="utf-8"><title>${t("梨园")}</title>` +
 		`<style>` +
 		`*{box-sizing:border-box;margin:0;padding:0}` +
-		`html,body{width:100%;height:100%;overflow:hidden;background:#141110;color:#c4bbb1;` +
-		`font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei","Noto Sans SC",sans-serif;` +
+		`html,body{width:100%;height:100%;overflow:hidden;background:radial-gradient(circle at 50% 45%, #faf7f2 0%, #f7f4f0 65%, #f2ede6 100%);color:#3d3833;` +
+		`font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei","Noto Serif SC",serif;` +
 		`-webkit-user-select:none;user-select:none}` +
-		`.splash{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px}` +
-		`.splash-logo{width:80px;height:80px;border-radius:18px;box-shadow:0 8px 32px rgba(0,0,0,0.45),0 2px 8px rgba(0,0,0,0.3);display:block}` +
-		`.splash-loading{display:flex;align-items:center;gap:9px;font-size:13px;letter-spacing:0.18em;color:#9a9188}` +
-		`.splash-dot{width:6px;height:6px;border-radius:50%;background:#e25a3c;animation:splash-pulse 1.8s ease-in-out infinite}` +
-		`@keyframes splash-pulse{0%,100%{opacity:0.3;transform:scale(0.85)}50%{opacity:1;transform:scale(1.15);box-shadow:0 0 8px rgba(226,90,60,0.6)}}` +
+		`.splash{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative}` +
+		`.splash-card{position:relative;width:96px;height:96px;border-radius:24px;background:#fffcfa;border:1px solid #ebe6df;` +
+		`box-shadow:0 4px 20px rgba(33,30,27,0.07),0 1px 3px rgba(33,30,27,0.04);display:flex;align-items:center;justify-content:center;` +
+		`margin-bottom:22px;animation:splash-float 3.2s ease-in-out infinite}` +
+		`.splash-logo{width:72px;height:72px;border-radius:16px;display:block}` +
+		`.splash-title{font-size:26px;font-weight:600;letter-spacing:0.35em;text-indent:0.35em;color:#1c1917;margin-bottom:8px;` +
+		`font-family:"Noto Serif SC","Source Han Serif SC","STZhongsong","Songti SC","SimSun",serif}` +
+		`.splash-sub{font-size:12px;color:#968e85;letter-spacing:0.14em;margin-bottom:34px;` +
+		`font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}` +
+		`.splash-bar{width:140px;height:3px;border-radius:3px;background:#e8e2da;position:relative;overflow:hidden;margin-bottom:14px}` +
+		`.splash-shimmer{position:absolute;top:0;left:-60px;width:60px;height:100%;border-radius:3px;` +
+		`background:linear-gradient(90deg,transparent,#bc4123,transparent);animation:splash-shimmer 1.8s cubic-bezier(0.4,0,0.2,1) infinite}` +
+		`.splash-status{font-size:12px;letter-spacing:0.14em;color:#6a635c;display:flex;align-items:center;gap:6px;animation:splash-fade 2s ease-in-out infinite}` +
+		`.splash-dot{width:5px;height:5px;border-radius:50%;background:#bc4123;display:inline-block}` +
+		`.splash-footer{position:absolute;bottom:24px;font-size:11px;letter-spacing:0.08em;color:#b5ada4;font-family:-apple-system,BlinkMacSystemFont,sans-serif}` +
+		`@keyframes splash-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}` +
+		`@keyframes splash-shimmer{0%{left:-60px}100%{left:140px}}` +
+		`@keyframes splash-fade{0%,100%{opacity:0.75}50%{opacity:1}}` +
 		`</style></head>` +
 		`<body><main class="splash">` +
-		`<img class="splash-logo" src="${logoSrc}" alt="${t("梨园")}" />` +
-		`<div class="splash-loading"><span class="splash-dot"></span><span>${t("加载中…")}</span></div>` +
+		`<div class="splash-card"><img class="splash-logo" src="${logoSrc}" alt="${t("梨园")}" /></div>` +
+		`<div class="splash-title">${t("梨园")}</div>` +
+		`<div class="splash-sub">${t("基于 pi 构建的 RP Agent")}</div>` +
+		`<div class="splash-bar"><div class="splash-shimmer"></div></div>` +
+		`<div class="splash-status"><span class="splash-dot"></span><span>${t("正在准备扮演…")}</span></div>` +
+		`<div class="splash-footer">v${app.getVersion?.() || "1.6.2"} · Liyuan Engine</div>` +
 		`</main></body></html>`;
 	return "data:text/html;charset=utf-8," + encodeURIComponent(html);
 }
@@ -525,7 +544,7 @@ function createWindow() {
 		height: 820,
 		minWidth: 940,
 		minHeight: 600,
-		backgroundColor: "#141110",
+		backgroundColor: "#f7f4f0",
 		title: t("梨园"),
 		autoHideMenuBar: true, // 菜单栏默认隐藏（Alt 呼出）——2026-09-12 用户反馈
 	});

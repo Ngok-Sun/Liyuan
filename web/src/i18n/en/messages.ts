@@ -104,6 +104,10 @@ export const messages: Record<string, string> = {
 	"存档": "Save point",
 	"文生音：为这段正文生成语音并显示播放器": "Text to speech: generate audio for this text and show a player",
 	"配音中…": "Voicing…",
+	"文件和讨论一起回退到该轮之前": "Restore files and discussion to before this turn",
+	"重新编辑本轮": "Re-edit this turn",
+	"保存当前检查点快照": "Save current checkpoint snapshot",
+	"删除本轮讨论回复": "Delete this discussion reply",
 	// 状态条
 	"（未记录）": "(not recorded)",
 	"编辑": "Edit",
