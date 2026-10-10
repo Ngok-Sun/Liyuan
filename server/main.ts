@@ -146,10 +146,10 @@ import {
 	type WireCheckpoint,
 } from "./wire.ts";
 import { chapterTitle, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type Checkpoint } from "../src/stage/story-history.ts";
-import { sameCardPath } from "../src/paths.ts";
+import { chatDirOf, chatSessionsDirOf, sameCardPath } from "../src/paths.ts";
 import { readSessionCardInfo } from "../src/session-scan.ts";
 import { t } from "../src/i18n/index.ts";
-import { cardDirOfChatDir, cardFileIn, chatDataPath, chatDirOf, chatDirOfSessionDir, chatModeOfSessionDir, chatSessionsDirOf, createChat, loadCardConfig, mergeCardConfig, resolveCardSpace } from "../src/cardspace.ts";
+import { cardDirOfChatDir, cardFileIn, chatDataPath, chatDirOfSessionDir, chatModeOfSessionDir, createChat, loadCardConfig, mergeCardConfig, resolveCardSpace } from "../src/cardspace.ts";
 import { chatSessionsOf, chatsOfCard, ensureStorySessionDir, newChatSessionDir, storySessionTarget } from "../src/story-guide.ts";
 import { loadManifest, memoryPaths, saveManifest, syncCardMemory } from "../src/card-memory.ts";
 import { alreadyMigrated, applyCardMigration, planCardMigration, planOrphanSessions, promoteStagedCard } from "../src/migrate-cards.ts";
