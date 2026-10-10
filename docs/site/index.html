@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>梨园 Liyuan · 官方使用说明与架构手册</title>
+  <meta name="description" content="梨园 Liyuan v1.6.3 官方说明文档：基于 pi 构建的 RP Agent，包含安装部署、双模式创作、外观主题中心、界面功能详解与常见问题解答。" />
+  <link rel="icon" href="images/logo.png" type="image/png" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ================= 顶栏 Header ================= -->
+  <header class="site-header">
+    <div class="brand-group">
+      <button class="btn-icon mobile-nav-toggle" id="mobileToggle" aria-label="展开目录">
+        <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+      </button>
+      <img class="brand-logo" src="images/logo.png" alt="梨园" />
+      <div class="brand-title">
+        梨园 <span>Liyuan</span>
+        <span class="badge-version">v1.6.3</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <!-- 双语切换器 -->
+      <div class="lang-switch">
+        <a href="index.html" class="lang-btn active" title="简体中文">中文</a>
+        <span class="lang-sep">/</span>
+        <a href="en.html" class="lang-btn" title="English">EN</a>
+      </div>
+
+      <a class="btn-icon" href="https://github.com/weidu12123/Liyuan" target="_blank" rel="noreferrer">
+        <svg viewBox="0 0 24 24"><path d="M12 2A10 10 0 0 0 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.1-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2z"/></svg>
+        <span>GitHub</span>
+      </a>
+
+      <button class="btn-icon" id="themeToggle" aria-label="切换明暗主题">
+        <svg viewBox="0 0 24 24"><path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9c0-.46-.04-.92-.1-1.36-.98 1.37-2.58 2.26-4.4 2.26-3.03 0-5.5-2.47-5.5-5.5 0-1.82.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z"/></svg>
+        <span class="theme-text">黑夜</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= 主布局 Layout ================= -->
+  <div class="layout-container">
+
+    <!-- 左侧目录导航 Sidebar -->
+    <aside class="site-sidebar" id="sidebar">
+      <div class="sidebar-heading">第一板块</div>
+      <ul class="nav-list">
+        <li class="nav-item">
+          <a class="nav-link active" href="#part1-intro">
+            <span>初步介绍与安装</span>
+            <span class="nav-badge">介绍</span>
+          </a>
+        </li>
+      </ul>
+
+      <div class="sidebar-heading">第二板块</div>
+      <ul class="nav-list">
+        <li class="nav-item">
+          <a class="nav-link" href="#part2-quickstart">
+            <span>快速上手指南</span>
+            <span class="nav-badge">上手</span>
+          </a>
+        </li>
+      </ul>
+
+      <div class="sidebar-heading">第三板块</div>
+      <ul class="nav-list">
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-home">
+            <span>主交互与会话树</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-theme">
+            <span>外观主题中心</span>
+            <span class="nav-badge">新</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-agent-mode">
+            <span>Agent 模式创作</span>
+            <span class="nav-badge">核心</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-connection">
+            <span>连接与模型参数</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-prompts">
+            <span>提示词体系</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-worldbook">
+            <span>世界书与宽屏展板</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-materials">
+            <span>资料与素材库</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-extensions">
+            <span>扩展技能与 MCP</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-card-studio">
+            <span>角色卡工坊</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#part3-ui-settings">
+            <span>系统设置与长文治理</span>
+          </a>
+        </li>
+      </ul>
+
+      <div class="sidebar-heading">第四板块</div>
+      <ul class="nav-list">
+        <li class="nav-item">
+          <a class="nav-link" href="#part4-faq">
+            <span>常见问题与注意事项</span>
+            <span class="nav-badge">必读</span>
+          </a>
+        </li>
+      </ul>
+    </aside>
+
+    <!-- 右侧正文 Main Content -->
+    <main class="site-main">
+      <article class="doc-article">
+
+        <!-- 文档 Hero 头部 -->
+        <header class="doc-hero">
+          <div class="hero-tag">
+            <span class="hero-tag-dot"></span>
+            <span>基于 pi 构建的 RP Agent · Bringing Coding Agent Superpowers to Roleplay</span>
+          </div>
+          <h1 class="hero-title">梨园 Liyuan 说明文档</h1>
+          <p class="hero-subtitle">
+            梨园是基于 pi 构建的 RP Agent，将 coding agent 的诸多能力 RP 化。彻底告别传统前端的上下文臃肿、设定漂移、幻觉编造、提示词无休止堆叠与平台锁定，带来具备确定性、透明度与沉浸感的人机共创体验。
+          </p>
+
+          <div class="hero-meta-grid">
+            <div class="meta-card">
+              <div class="meta-card-label">当前版本</div>
+              <div class="meta-card-value">v1.6.3</div>
+            </div>
+            <div class="meta-card">
+              <div class="meta-card-label">内核</div>
+              <div class="meta-card-value">pi agent 原生工作流</div>
+            </div>
+            <div class="meta-card">
+              <div class="meta-card-label">跨平台</div>
+              <div class="meta-card-value">Windows / macOS / Linux / Docker</div>
+            </div>
+          </div>
+        </header>
+
+        <!-- ================= 第一板块：初步介绍与安装 ================= -->
+        <section class="doc-section" id="part1-intro">
+          <div class="section-header">
+            <span class="section-num">PART 01</span>
+            <h2>第一板块 · 初步介绍与安装</h2>
+          </div>
+
+          <h3>1.1 梨园是什么</h3>
+          <p>
+            梨园是基于 pi 构建的 RP Agent，将软件工程 Coding Agent 的诸多核心范式映射到角色扮演与故事创作中。
+          </p>
+          <p>
+            在传统前端中，大模型仅仅作为被动接收单次提问并输出纯文本的补全接口，容易引发长文本遗忘、设定漂移、提示词无休止堆叠等问题。梨园全面引入智能体循环、沙箱物理隔离与工件化工作流：
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Coding Agent 能力</th>
+                  <th>梨园 RP 化映射</th>
+                  <th>实际功能与机制体现</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>工作区隔离（Workspace / cwd）</strong></td>
+                  <td>角色卡独立空间（一卡一目录）</td>
+                  <td>每张卡为一个独立的物理工作区，会话、记忆、设定与素材物理聚合，直接拷贝即可无损跨机迁移。</td>
+                </tr>
+                <tr>
+                  <td><strong>代码（Code）</strong></td>
+                  <td>剧情正文（Story Prose）</td>
+                  <td>将叙事正文视为活的创作工件，区分扮演气泡与 Agent 一章一文件（<code>正文/*.md</code>）双模式。</td>
+                </tr>
+                <tr>
+                  <td><strong>局部改写（Edit / Patch）</strong></td>
+                  <td>局部定点修改</td>
+                  <td>精准匹配原文指定行进行增删改，杜绝为了修改几句话而全盘重写的昂贵浪费。</td>
+                </tr>
+                <tr>
+                  <td><strong>文件检索（Grep / Search）</strong></td>
+                  <td>世界书与记忆检索</td>
+                  <td>模型在下笔前通过工具主动查阅设定集与过往记忆，不在常驻上下文里塞满无用词条。</td>
+                </tr>
+                <tr>
+                  <td><strong>版本快照（Rewind / Checkpoint）</strong></td>
+                  <td>检查点与分支回滚</td>
+                  <td>具备内容寻址的轻量快照仓（<code>历史/</code>），随改随存，支持任意改动行级 diff 与回退。</td>
+                </tr>
+                <tr>
+                  <td><strong>上下文压缩（Compact）</strong></td>
+                  <td>剧情前情提要接力</td>
+                  <td>根据叙事脉络提炼接力摘要，原文归档入库，保持活动提示词窗口轻盈黑润。</td>
+                </tr>
+                <tr>
+                  <td><strong>权限确认（Permission Gate）</strong></td>
+                  <td>剧情分岔决策卡（ask 工具）</td>
+                  <td>遇到重大剧情分歧时主动停笔，通过选择卡交由用户决策故事走向，实现人机真正共创。</td>
+                </tr>
+                <tr>
+                  <td><strong>规则分层（SYSTEM / AGENTS）</strong></td>
+                  <td>提示词三层体系</td>
+                  <td>引擎底层协议、全局追加准则与卡片世界法则分层存放，支持条目级单独开关。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>1.2 双形态创作体系：Roleplay 模式与 Agent 模式</h3>
+          <p>
+            梨园提供两套相互平行、分流管理的创作模式，在会话树中各自拥有独立切签：
+          </p>
+          <ul>
+            <li><strong>🎭 扮演模式（Roleplay Mode）</strong>：主打沉浸式剧情推演。底层技术调用在后台封闭，正文在消息流中作为拍级工件呈现，具备时间/地点/状态账本、登场名录与分支世界线回溯。</li>
+            <li><strong>📖 Agent 模式（Prose Agent Mode）</strong>：趋近于一般的 Coding Agent。正文与讨论层彻底分离：讨论区负责探讨、下达指令与修改意见，正文按「一章一文件」（<code>正文/001-章名.md</code>）持久化落盘，模型通过原生工具精准编辑文件，具备本地快照仓与行级 diff 回显。</li>
+          </ul>
+
+          <h3>1.3 安装与部署方式</h3>
+          <p>
+            梨园提供桌面客户端（免配置环境）、Docker 预构建镜像、源码本地运行以及 VPS 服务端无头部署四种方式：
+          </p>
+
+          <h4>方式一：桌面安装包（推荐，开箱即用）</h4>
+          <p>
+            前往 <a href="https://github.com/weidu12123/Liyuan/releases/latest" target="_blank" rel="noreferrer">GitHub Releases 最新发布页</a> 下载对应操作系统的安装包：
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>操作系统</th>
+                  <th>分发文件</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Windows</td>
+                  <td><code>Liyuan-*-win-desktop-setup.exe</code></td>
+                  <td>标准 NSIS 安装包，双击安装，支持应用内自动检测更新。</td>
+                </tr>
+                <tr>
+                  <td>Windows（便携版）</td>
+                  <td><code>Liyuan-*-win-desktop-portable.zip</code></td>
+                  <td>解压后直接双击 <code>Liyuan.exe</code> 运行，免安装，不写注册表。</td>
+                </tr>
+                <tr>
+                  <td>macOS</td>
+                  <td><code>Liyuan-*-mac-desktop-arm64.dmg</code> / <code>-x64.dmg</code></td>
+                  <td>提供 Apple Silicon 与 Intel 双版本。首次运行需在「系统设置 → 隐私与安全性」允许。</td>
+                </tr>
+                <tr>
+                  <td>Linux</td>
+                  <td><code>Liyuan-*-linux-desktop.AppImage</code></td>
+                  <td>执行 <code>chmod +x</code> 赋予执行权限后直接双击运行。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            桌面版采用「白瓷朱砂」极简呼吸启动界面，开窗彻底不闪黑。首次启动会引导选定数据目录（默认在系统的文档目录下），卡片、会话、记忆全部独立存储于该目录，重装或升版应用绝不丢失数据。
+          </p>
+
+          <h4>方式二：Docker 容器部署（推荐服务器部署）</h4>
+          <p>
+            官方提供已构建完成的双架构镜像（amd64 / arm64），服务器无需安装 Node.js，拉取即跑：
+          </p>
+          <pre><code>mkdir -p liyuan && cd liyuan
+curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/weidu12123/Liyuan/master/deploy/compose.ghcr.yml
+docker compose up -d
+
+# 升级至最新版本
+docker compose pull && docker compose up -d</code></pre>
+          <p>
+            镜像地址为 <code>ghcr.io/weidu12123/liyuan:latest</code>。数据目录自动挂载于宿主机当前目录的 <code>./data/</code> 下，便于备份和迁移。
+          </p>
+
+          <h4>方式三：源码本地运行</h4>
+          <p>要求系统安装 Node.js ≥ 22：</p>
+          <pre><code># 1. 克隆代码仓库
+git clone https://github.com/weidu12123/Liyuan.git && cd Liyuan
+
+# 2. 准备配置文件
+cp liyuan.agent.example.json liyuan.agent.json
+cp liyuan.config.example.json liyuan.config.json
+
+# 3. 安装依赖并启动
+npm install
+npm run web:build    # 编译前端
+npm run web          # 启动服务，浏览器打开 http://127.0.0.1:7620</code></pre>
+          <p>
+            Windows 环境可双击 <code>start.bat</code>，Linux / macOS 环境执行 <code>./start.sh</code>。
+          </p>
+
+          <div class="callout callout-warn">
+            <div class="callout-title">⚠️ 端口安全警告</div>
+            梨园默认端口 7620 在未配置访问密码前为全开放状态。部署到公网或局域网共享时，请在启动后第一时间进入界面「系统设置」设置访问密码。
+          </div>
+        </section>
+
+        <!-- ================= 第二板块：快速上手 ================= -->
+        <section class="doc-section" id="part2-quickstart">
+          <div class="section-header">
+            <span class="section-num">PART 02</span>
+            <h2>第二板块 · 快速上手指南</h2>
+          </div>
+          <p>
+            仅需完成以下四个关键操作，即可开启第一场高质量沉浸式创作：
+          </p>
+
+          <div class="steps-container">
+            <div class="step-item">
+              <div class="step-title">第一步：配置访问密码与基础防护</div>
+              <p>
+                点击左侧导航轨底部的「齿轮图标（设置）」，在「访问密码」卡片输入至少 4 位字符的密码并保存。拦截未授权的公网探测与额度盗刷。
+              </p>
+            </div>
+
+            <div class="step-item">
+              <div class="step-title">第二步：配置模型连接（API 接入）</div>
+              <p>
+                点击左侧导航轨的「插头图标（连接）」，点击「+ 生成配置」，填入服务商的 API 端点、Key 与模型名称：
+              </p>
+              <ul>
+                <li><strong>思考档 (Thinking Mode)</strong>：日常流畅对话建议设为 <code>off</code>，需要极深剧情逻辑推演时设为 <code>low</code>。非思考模型必须设为 <code>off</code>。</li>
+                <li><strong>上下文窗口 (Context Window)</strong>：建议填写 <code>128000</code> (128k)。</li>
+                <li><strong>最大回复 tokens</strong>：默认推荐 <code>16384</code> (16k)，满足一拍内多段落长文输出。</li>
+                <li><strong>流式传输</strong>：保持勾选状态，享受实时打字机渲染。</li>
+              </ul>
+            </div>
+
+            <div class="step-item">
+              <div class="step-title">第三步：挑选角色卡并选择创作形态</div>
+              <p>
+                点击左侧顶部的「角色库图标」，选择内置示例卡或导入卡片：
+              </p>
+              <ul>
+                <li><strong>开启沉浸扮演</strong>：在左栏选用开场白分支，直接点击「开始对话」；</li>
+                <li><strong>开启 Agent 独立写小说</strong>：点击「新建项目」，勾选「📖 正文 Agent」模式，第一幕将自动落成 <code>000-开场.md</code>，进入正文一章一文件创作模式。</li>
+              </ul>
+            </div>
+
+            <div class="step-item">
+              <div class="step-title">第四步：让 Agent 人机协同写卡与自建世界</div>
+              <p>
+                手头没有满意的角色卡？将顶栏模式切为「工作模式」，在对话框直接说：<em>“我想做一张修仙门派长老的角色卡，请帮我规划背景与技能，并录入工坊大纲”</em>。背后的 <code>card-authoring</code> 技能会自动调度工具集，遵循规范自动生成并落盘保存。
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= 第三板块：每个界面的介绍 ================= -->
+        <section class="doc-section" id="part3-ui">
+          <div class="section-header">
+            <span class="section-num">PART 03</span>
+            <h2>第三板块 · 核心界面与功能详解</h2>
+          </div>
+
+          <!-- 3.1 主对话与会话树 -->
+          <div id="part3-ui-home" style="padding-top: 16px;">
+            <h3>3.1 主交互与会话树管理</h3>
+            <p>
+              主工作区包含全局导航轨、会话树项目管理栏、主视窗对话区与底部自适应工具栏。
+            </p>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>主交互全景图解</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/01-home.png" alt="主交互界面" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">会话树与项目管理核心升级</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>双模式胶囊分流</strong>
+                    顶部提供 <code>[ 🎭 扮演会话 | 📖 正文 Agent ]</code> 两个专属 Tab，各自统计项目数量，彻底终结两类形态混杂的混乱。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>解禁当前项目平滑删除</strong>
+                    解除当前打开项目的删除死锁，无论是否活动项目均可直接删除。删除当前项目时系统自动平滑切入下一个项目（或新开空白项目），无缝过渡。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>彻底物理遗忘闭环</strong>
+                    删除项目将连根拔起子项目目录（正文、快照、会话、状态账本），并同步物理删除卡级复盘文件，写入遗忘队列，彻底抹除已删局的所有剧情事实。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>底部自适应工具</strong>
+                    Agent 模式下自动切换为「存档」「回退」「上传」，屏蔽不相关的扮演专属动作。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.2 外观主题中心 -->
+          <div id="part3-ui-theme" style="padding-top: 16px;">
+            <h3>3.2 外观主题中心（Theme Center）</h3>
+            <p>
+              左侧导航轨提供调色板入口，打开 370px 独立抽屉，带来通透清澈的沉浸式视觉定制：
+            </p>
+            <div class="screen-card">
+              <div class="screen-card-body">
+                <div class="screen-card-title">三大视觉核心能力</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>预设主题宫格与 16:9 实时预览</strong>
+                    内置「白瓷朱砂」「玄黑赤金」「千里青绿」「青花瓷韵」「落樱微雨」「沧浪寒潭」6 套精选主题，上部大视窗跟随点击实时联动，全局一键换肤。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>高清通透背景壁纸</strong>
+                    独立壁纸渲染层置于底层，主区浮层采用亚克力微透（正文区 35% 浅透保持文字黑润清晰，卡片 70%~82% 透光），彻底切除牛奶白遮罩；支持拖拽上传并配备清晰度（10%~100%）与背景模糊度（0~20px）即时滑块。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>自定义 CSS 样式注入</strong>
+                    支持直接编写自定义 CSS 规则或导入样式文件，带有一键启用/停用开关，为进阶玩家开放绝对自由的样式控制权。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.3 Agent 模式正文创作 -->
+          <div id="part3-ui-agent-mode" style="padding-top: 16px;">
+            <h3>3.3 Agent 模式正文独立创作工作流</h3>
+            <p>
+              将 Coding Agent 工作流完整迁移至长篇正文写作：
+            </p>
+            <div class="screen-card">
+              <div class="screen-card-body">
+                <div class="screen-card-title">正文工件与沙箱物理隔离</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>一章一文件</strong>
+                    正文按 <code>正文/001-章名.md</code> 在磁盘独立排列，文件名即阅读顺序。正文完全开放原生读写，不再污染对话历史。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>快照仓与行级 Diff</strong>
+                    每次改动在 <code>历史/</code> 沉淀内容寻址快照与检查点，过程条展开显示绿色/红色行级差异，随时双击恢复或回到某次输入。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>多项目物理隔离守卫</strong>
+                    沙箱底层严格以当前项目为界，严禁任何工具跨项目读取、编辑、搜索或探测，保障卡下各个小说的绝对独立纯净。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>双端自适应交互</strong>
+                    桌面端支持鼠标拖拽正文与讨论的比例（20%~85%），双击恢复 60%；手机端支持顺畅的双轨滑动手势。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.4 模型连接与生成参数 -->
+          <div id="part3-ui-connection" style="padding-top: 16px;">
+            <h3>3.4 模型连接与生成参数面板</h3>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>连接面板视图</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/03-connection.png" alt="模型连接面板" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">参数调优指引</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>思考档 (Thinking Mode)</strong>
+                    非推理模型设为 <code>off</code>；DeepSeek-R1 等推理模型根据需要选择 <code>off</code> 或 <code>low</code>。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>上下文窗口</strong>
+                    推荐 <code>128000</code>，满足复杂世界书检索与长篇剧情回溯。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>最大回复长度</strong>
+                    推荐 <code>16384</code>，确保模型输出长段落正文时不被截断。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.5 提示词体系 -->
+          <div id="part3-ui-prompts" style="padding-top: 16px;">
+            <h3>3.5 提示词分层体系</h3>
+            <p>
+              严守「禁止堆叠提示词」铁律，梨园的提示词由三处独立载体构成，互不污染：
+            </p>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>提示词分层全览</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/05-prompt-system.png" alt="全局提示词体系" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">三层提示词定位</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>全局层 (SYSTEM / APPEND_SYSTEM)</strong>
+                    <code>SYSTEM.md</code> 定义基础环境认知；<code>APPEND_SYSTEM.md</code> 条目化管理核心准则，支持单项开关。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>卡档案 (AGENTS.md)</strong>
+                    存放卡私有规则与人设法则。<strong>底稿由系统纯粹生成，世界书条目由镜像动态持有，绝不硬编码抄进底稿</strong>，彻底消除无主孤儿条目。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>装配层 (预设库)</strong>
+                    作为数据解析外部酒馆预设，自动分拣机制段与写作规则，避免硬编码污染。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.6 世界书 -->
+          <div id="part3-ui-worldbook" style="padding-top: 16px;">
+            <h3>3.6 世界书（设定集）与宽屏大展板</h3>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>世界书面板视图</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/08-worldbook.png" alt="世界书管理面板" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">世界书核心机制</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>宽屏大展板 (LoreDetailCenter)</strong>
+                    电脑端点击条目「详情」直接在主视窗舒展呈现大字号标题、属性胶囊与宽大编辑域，支持 <code>Esc</code> 一键关闭。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>无主条目自动收口</strong>
+                    删除或更换世界书时，系统无条件执行全量软刷新与镜像对账，自动剥除历史遗留无主条目，0 残留。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>按需检索与蓝灯常驻</strong>
+                    常驻设定进入卡档案镜像，普通词条在需要时通过检索工具命中，不撑爆提示词窗口。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.7 资料库 -->
+          <div id="part3-ui-materials" style="padding-top: 16px;">
+            <h3>3.7 资料与本地素材库面板</h3>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>资料管理视图</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/09-materials.png" alt="资料与素材面板" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">文件引用与归档</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>只读引用传输</strong>
+                    上传大文件后仅传递服务端路径，模型直接读本地文件，不重复走网络请求。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>AI 生图本地沉淀</strong>
+                    对话生成的图片自动收拢进素材库，可随时回溯并在后续章节继续引用。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.8 扩展技能与 MCP -->
+          <div id="part3-ui-extensions" style="padding-top: 16px;">
+            <h3>3.8 扩展技能、MCP 与视觉能力</h3>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>扩展与技能视图</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/10-extensions.png" alt="扩展技能与办事笔记" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">技能与视觉生态</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>screenshot 视觉截图</strong>
+                    新增 <code>screenshot</code> 工具，模型可直接截取用户屏幕渲染的正文排版画面回传自核。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>mermaid 图表原生支持</strong>
+                    正文中直接渲染流程图与时序图，自适应昼夜主题，语法错误优雅回落。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>MCP 协议挂载</strong>
+                    支持 Model Context Protocol 标准工具，打通外部搜索与代码执行。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.9 角色卡工坊 -->
+          <div id="part3-ui-card-studio" style="padding-top: 16px;">
+            <h3>3.9 角色卡工坊（00~09 十步创作大纲）</h3>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>角色卡工坊大纲视图</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/04-card-studio.png" alt="角色卡工坊大纲" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">十步大纲全集拆解</div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>步骤</th>
+                        <th>板块名称</th>
+                        <th>主要功能与录入项</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><strong>00</strong></td>
+                        <td>作品设置</td>
+                        <td>更换封面立绘、卡名、简短介绍、作者署名与版本号。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>01</strong></td>
+                        <td>角色设定</td>
+                        <td>深层人格、外貌形态、语言风格、动机偏好与核心秘密。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>02</strong></td>
+                        <td>世界书与设定集</td>
+                        <td>当前角色绑定的背景规则、地理人文与专属势力词条。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>03</strong></td>
+                        <td>创作与系统规则</td>
+                        <td>文风偏向、语气约束、格式规范与不可逾越的戒律。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>04</strong></td>
+                        <td>第一条消息与开场分支</td>
+                        <td>首拍入戏开场白，可创建并管理多条平行剧情线。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>05</strong></td>
+                        <td>MVU 变量系统</td>
+                        <td>好感度、数值属性、动态状态树的定义与初值。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>06</strong></td>
+                        <td>状态栏与卡面组件</td>
+                        <td>定制角色专属的卡面 UI 状态栏渲染模板。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>07</strong></td>
+                        <td>消息前端与显示正则</td>
+                        <td>排版渲染规则、内容围栏剥离与特定标签样式替换。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>08</strong></td>
+                        <td>EJS 动态模板</td>
+                        <td>基于状态数据的条件分支渲染与动态逻辑注入。</td>
+                      </tr>
+                      <tr>
+                        <td><strong>09</strong></td>
+                        <td>检查与导出</td>
+                        <td>语法与结构合规自检，一键导出为通用 JSON 或嵌入 PNG。</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.10 系统设置与长文治理 -->
+          <div id="part3-ui-settings" style="padding-top: 16px;">
+            <h3>3.10 全局设置与长文本治理面板</h3>
+            <div class="screen-card">
+              <div class="screen-card-header">
+                <div class="screen-badge">
+                  <span class="screen-badge-dot"></span>
+                  <span>长文本治理与防护</span>
+                </div>
+                <span class="screen-hint">点击可放大查看</span>
+              </div>
+              <div class="screen-img-wrap">
+                <img class="screen-img" src="images/11-agent-settings.png" alt="系统设置面板" />
+              </div>
+              <div class="screen-card-body">
+                <div class="screen-card-title">长文防爆与防漂移机制</div>
+                <ul class="keypoints-list">
+                  <li class="keypoint-item">
+                    <strong>固定楼层压缩周期 (建议 20~30 轮)</strong>
+                    每满周期自动将早期正文提炼为接力摘要，原文归档入库，保持窗口轻量。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>关键词扫描深度 (建议 4 轮)</strong>
+                    被动触发设定条目时仅回溯近拍，避免扫进陈旧剧情。
+                  </li>
+                  <li class="keypoint-item">
+                    <strong>全量一键备份与物理迁移</strong>
+                    在设置区可一键导出数据 zip 快照，导入时自动保留回退快照防止覆盖。
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= 第四板块：常见问题与注意事项 ================= -->
+        <section class="doc-section" id="part4-faq">
+          <div class="section-header">
+            <span class="section-num">PART 04</span>
+            <h2>第四板块 · 常见问题与注意事项 (FAQ)</h2>
+          </div>
+
+          <div class="faq-group">
+            <details class="faq-item">
+              <summary class="faq-summary">Q1：扮演模式、工作模式与 Agent 模式有什么区别？何时选用？</summary>
+              <div class="faq-content">
+                <ul>
+                  <li><strong>🎭 扮演模式</strong>：用于与角色沉浸式演播。技术细节被封闭，正文在气泡中流式展现，自动记账好感与世界状态。</li>
+                  <li><strong>📖 Agent 模式</strong>：用于长篇小说/剧本独立创作。正文与讨论区彻底分流，讨论出结论后模型自动落盘为一章一文件（<code>001-初雪.md</code>），具备本地快照仓与行级 diff。</li>
+                  <li><strong>🛠️ 工作模式</strong>：在扮演中随时切入边聊边改卡片、调试前端正则或增删词条，改完切回扮演继续演出，调试 chatter 不污染剧情。</li>
+                </ul>
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary class="faq-summary">Q2：同一角色卡下面的多个独立项目，如何确保互不读取和污染？</summary>
+              <div class="faq-content">
+                梨园在 v1.6.3 建立了双重物理隔离守卫：
+                <ol>
+                  <li><strong>沙箱路径守卫 (isOtherChatPath)</strong>：任何原生工具读取、修改、搜索或列出同卡下其它项目目录的操作，会被沙箱底层直接 <code>DENY</code> 拦截；</li>
+                  <li><strong>状态块摘要阻断</strong>：Agent 模式的状态块恒不接入卡级跨项目常驻摘要，前情提要只认当前项目自身正文生成的摘要，新项目开局 0 污染。</li>
+                </ol>
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary class="faq-summary">Q3：删除项目或会话后，如何保证不留下任何记忆残留？</summary>
+              <div class="faq-content">
+                在会话树中点击项目行的红色垃圾桶删除项目时，系统会：
+                <ol>
+                  <li>递归彻底删除子项目目录（包含正文、历史快照、会话、状态账本、面板与向量记忆）；</li>
+                  <li>同步物理删除卡文件夹内的复盘文件（<code>记忆/局/<id>.md</code>）；</li>
+                  <li>从清单中注销并登记进遗忘名单，驱动重新合并，彻底抹除已删局的所有剧情事实。</li>
+                </ol>
+                若删除的是当前正在打开的项目，系统会自动平滑切至同模式其它项目（或新开空白项目），体验丝滑无阻。
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary class="faq-summary">Q4：为什么删除世界书后，卡档案里的世界书条目不会变成“无主残留”？</summary>
+              <div class="faq-content">
+                在 v1.6.3 中，卡档案（<code>AGENTS.md</code>）底稿建立时不再硬编码抄录世界书常驻条目，世界书条目 100% 由动态镜像机制（<code>syncLorebookMirror</code>）独立持有并带上来源后缀。删除或更换世界书时，系统会自动剥除历史遗留条目，绝不制造或遗留无主条目。
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary class="faq-summary">Q5：旁路模型（Side Model）用于记账为什么必须关闭思考？</summary>
+              <div class="faq-content">
+                旁路模型用于在每轮末尾异步更新变量账本与人物名录。记账属于快速结构化提炼，必须将思考档设为 <code>off</code>。若开启思考，每轮末尾可能需要额外等待几十秒甚至几分钟，极大拖慢推演节奏。
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary class="faq-summary">Q6：连接 API 时遇到 400 报错或 Invalid Argument 怎么处理？</summary>
+              <div class="faq-content">
+                请对照以下三点快速排查：
+                <ol>
+                  <li><strong>思考档位 (Thinking Mode)</strong>：非推理型模型不支持思考参数，传入思考档名会导致接口拒绝，请设为 <code>off</code>；</li>
+                  <li><strong>Base URL 端点格式</strong>：中转聚合站或第三方反代地址末尾是否正确补全了 <code>/v1</code> 或 <code>/v1/</code>；</li>
+                  <li><strong>上下文容量上限</strong>：确认填写的 Context Window 数值未超过该模型所允许的最大输入边界。</li>
+                </ol>
+              </div>
+            </details>
+
+            <details class="faq-item">
+              <summary class="faq-summary">Q7：如何把角色卡、会话与记忆数据完整迁移到另一台设备？</summary>
+              <div class="faq-content">
+                梨园采用一卡一目录的物理独立设计：
+                <ul>
+                  <li><strong>单卡无损迁移</strong>：只需将数据目录下的 <code>cards/角色名/</code> 文件夹完整拷贝到新设备的对应目录下。其下的全部历史会话、正文、卡级记忆与提示词自动保留。</li>
+                  <li><strong>整站全量备份</strong>：在「设置 → 备份与恢复」中点击「导出」下载 zip 全量快照；在新环境中点击「导入」即可一键恢复全部卡片、API 连接配置与全局设定。</li>
+                </ul>
+              </div>
+            </details>
+          </div>
+        </section>
+
+      </article>
+    </main>
+  </div>
+
+  <!-- ================= 图片放大灯箱 Lightbox ================= -->
+  <div class="lightbox" id="lightbox" role="dialog" aria-hidden="true">
+    <div class="lightbox-content">
+      <button class="lightbox-close" id="lightboxClose" aria-label="关闭大图">✕</button>
+      <img class="lightbox-img" id="lightboxImg" src="" alt="" />
+    </div>
+  </div>
+
+  <!-- ================= 浮动返回顶部 ================= -->
+  <button class="back-to-top" id="backToTop" aria-label="返回顶部">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg>
+  </button>
+
+  <!-- ================= 页脚 Footer ================= -->
+  <footer class="site-footer">
+    <p>梨园 Liyuan v1.6.3 · 基于 pi 构建的 RP Agent · Bringing Coding Agent Superpowers to Roleplay</p>
+    <p style="margin-top: 6px; font-size: 0.8rem;">
+      <a href="https://github.com/weidu12123/Liyuan" target="_blank" rel="noreferrer">GitHub 仓库</a> ·
+      <a href="https://github.com/weidu12123/Liyuan/releases/latest" target="_blank" rel="noreferrer">发布与更新</a> ·
+      <a href="en.html">English Documentation</a>
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
