@@ -28,6 +28,7 @@ import {
 	IconEdit,
 	IconPin,
 	IconRedo,
+	IconRefresh,
 	IconSpeaker,
 	IconTrash,
 	IconUndo,
@@ -777,6 +778,11 @@ export function Bubble({
 				)}
 				{hasActions && (
 					<div className="msg-actions">
+						{onReroll && (
+							<button className="act" onClick={onReroll} title={t("重新生成本轮回复")}>
+								<IconRefresh size={13} /> {t("重试")}
+							</button>
+						)}
 						{onRewind && (
 							<button className="act" onClick={onRewind} title={t("文件和讨论一起回退到该轮之前")}>
 								<IconUndo size={13} /> {t("回退")}

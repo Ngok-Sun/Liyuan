@@ -491,6 +491,7 @@ export interface CommandMeta {
 	usage: string;
 	description: string;
 	takesArgs: boolean;
+	mode?: "roleplay" | "agent" | "all";
 }
 
 export interface SkillInfo {

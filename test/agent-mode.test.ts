@@ -6,7 +6,8 @@ import { test } from "node:test";
 
 import { chatModeOfSessionDir, createChat } from "../src/cardspace.ts";
 import { CONVERSATION_PROCESS_TYPE } from "../src/conversation-mode.ts";
-import { collectChatEvidence } from "../src/card-memory.ts";
+import { collectChatEvidence, loadManifest, memoryPaths, saveManifest } from "../src/card-memory.ts";
+import { listCardMemory } from "../src/card-memory-tools.ts";
 import { harnessManagedPath, sandboxScope, sandboxVerdict } from "../src/sandbox.ts";
 import { buildAgentStateBlock } from "../src/stage/agent.ts";
 import { SUMMARY_ENTRY_TYPE, type BranchEntryLike } from "../src/stage/assemble.ts";
@@ -138,3 +139,107 @@ test("agent system 槽位：全局追加读 AGENT_APPEND_SYSTEM.md 而非扮演�
 	assert.ok(fallback.includes("## 正文是文件"), "agent 槽空缺退随包 AGENT_APPEND_SYSTEM.md");
 	assert.ok(!fallback.includes("扮演规矩"));
 });
+
+test("agent 讨论回退与删除：无检查点（纯讨论或调用报错）时也能定位末条用户输入并回退", () => {
+	const errorBranch: BranchEntryLike[] = [
+		{ id: "u1", type: "message", message: { role: "user", content: [{ type: "text", text: "第一章" }], details: { liyuanMode: "agent" } } },
+		{ id: "a1_err", type: "message", message: { role: "assistant", content: [{ type: "text", text: "API 429 报错" }], details: { liyuanMode: "agent", liyuanAuthoringReply: true } } },
+	];
+	let lastUserIdx = -1;
+	for (let i = errorBranch.length - 1; i >= 0; i--) {
+		if (errorBranch[i].type === "message" && (errorBranch[i].message as { role?: unknown })?.role === "user") {
+			lastUserIdx = i;
+			break;
+		}
+	}
+	assert.equal(lastUserIdx, 0);
+	assert.equal(errorBranch[lastUserIdx].id, "u1");
+	const hasReplyToDrop = errorBranch.slice(lastUserIdx + 1).some((e) => e.type === "message" && (e.message as { role?: unknown })?.role === "assistant");
+	assert.ok(hasReplyToDrop, "报错回复可以作为回复被删除");
+});
+
+test("多项目物理隔离：第二个项目绝对禁止读取或修改第一个项目的正文、会话与历史，状态块不注入跨项目复盘", () => {
+	const root = tmp();
+	try {
+		const cardsRoot = join(root, "cards");
+		const cardDir = join(cardsRoot, "某卡");
+		mkdirSync(cardDir, { recursive: true });
+		writeFileSync(join(cardDir, "某卡.json"), JSON.stringify({ data: { name: "某卡" } }));
+
+		const chat1 = createChat(cardDir, { mode: "agent", name: "项目1" });
+		const chat2 = createChat(cardDir, { mode: "agent", name: "项目2" });
+
+		writeFileSync(join(chat1.dir, "正文", "001-初雪.md"), "项目1的第一章。");
+		writeFileSync(join(chat2.dir, "正文", "001-长街.md"), "项目2的第一章。");
+
+		// 在 chat2 的作用域下
+		const scope2 = sandboxScope(root, { card: "cards/某卡/某卡.json" }, chat2.dir);
+		const grants = { dirs: [], bash: false };
+
+		// 读写项目1的正文：全部拒绝
+		assert.equal(sandboxVerdict("read", { path: join(chat1.dir, "正文", "001-初雪.md") }, scope2, grants).kind, "deny");
+		assert.equal(sandboxVerdict("edit", { path: join(chat1.dir, "正文", "001-初雪.md") }, scope2, grants).kind, "deny");
+		assert.equal(sandboxVerdict("write", { path: join(chat1.dir, "正文", "002.md") }, scope2, grants).kind, "deny");
+
+		// 读项目1的会话与历史：全部拒绝
+		assert.equal(sandboxVerdict("read", { path: join(chat1.dir, "会话", "a.jsonl") }, scope2, grants).kind, "deny");
+		assert.equal(sandboxVerdict("read", { path: join(chat1.dir, "历史", "检查点.jsonl") }, scope2, grants).kind, "deny");
+
+		// 列出对话总根（探测其他项目）：拒绝
+		assert.equal(sandboxVerdict("ls", { path: join(cardDir, "对话") }, scope2, grants).kind, "deny");
+
+		// 读写 chat2 自己的正文：放行
+		assert.equal(sandboxVerdict("read", { path: join(chat2.dir, "正文", "001-长街.md") }, scope2, grants).kind, "allow");
+		assert.equal(sandboxVerdict("write", { path: join(chat2.dir, "正文", "002-夜雨.md") }, scope2, grants).kind, "allow");
+
+		// 读卡级公共配置（卡本体）：放行
+		assert.equal(sandboxVerdict("read", { path: join(cardDir, "某卡.json") }, scope2, grants).kind, "allow");
+
+		// 状态块装配：chat2 的状态块只带 chat2 的正文，无 residentSummary 时绝不出跨项目前情
+		const block2 = buildAgentStateBlock({ state: defaultState(), files: listStoryFiles(join(chat2.dir, "正文")) });
+		assert.match(block2, /001-长街\.md/);
+		assert.doesNotMatch(block2, /初雪/);
+		assert.doesNotMatch(block2, /【前情提要】/);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("项目物理删除与记忆彻底清除：删项目时连根拔起正文、会话、快照及卡级复盘，清单自动登记遗忘", () => {
+	const root = tmp();
+	try {
+		const cardsRoot = join(root, "cards");
+		const cardDir = join(cardsRoot, "某卡");
+		mkdirSync(cardDir, { recursive: true });
+		writeFileSync(join(cardDir, "某卡.json"), JSON.stringify({ data: { name: "某卡" } }));
+
+		const chat1 = createChat(cardDir, { mode: "agent", name: "待删项目" });
+		writeFileSync(join(chat1.dir, "正文", "001-初雪.md"), "将被删除的正文。");
+		writeFileSync(join(chat1.sessionsDir, "a.jsonl"), `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z" })}\n`);
+
+		// 创建卡级复盘文件与清单记录
+		const p = memoryPaths(cardDir);
+		mkdirSync(p.recapsDir, { recursive: true });
+		const recapFile = p.recapOf(chat1.id);
+		writeFileSync(recapFile, "待删项目的卡级复盘事实。", "utf8");
+		const manifest = loadManifest(cardDir);
+		manifest.recaps[chat1.id] = { sourceMark: "mark1", recapAt: new Date().toISOString() };
+		saveManifest(cardDir, manifest);
+
+		// 删除前可查到复盘
+		assert.ok(existsSync(recapFile));
+		assert.ok(listCardMemory(cardDir).some((d) => d.ref === `card:recap:${chat1.id}`));
+
+		// 模拟执行彻底删除项目逻辑
+		rmSync(chat1.dir, { recursive: true, force: true });
+		if (existsSync(recapFile)) rmSync(recapFile, { force: true });
+		delete manifest.recaps[chat1.id];
+		manifest.manual ??= { protectedRefs: [], forgottenChats: [], supersededRecaps: {}, aggregatePinned: false, epoch: 0 };
+		manifest.manual.forgottenChats.push(chat1.id);
+		saveManifest(cardDir, manifest);
+
+		// 验证彻底物理清除
+		assert.equal(existsSync(chat1.dir), false, "子项目目录已彻底删除");
+		assert.equal(existsSync(recapFile), false, "卡级复盘已彻底删除");
+		assert.equal(listCardMemory(cardDir).some((d) => d.ref === `card:recap:${chat1.id}`), false, "卡级记忆列表0残留");
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+

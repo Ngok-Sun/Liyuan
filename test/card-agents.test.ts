@@ -163,3 +163,46 @@ test("世界书镜像同步（syncLorebookMirror）：挂上就有、卸下就�
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+test("世界书被删除或更换：清理历史遗留无主 '# 世界设定' 段落，绝不留无主条目", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-orphan-lore-"));
+	process.env.LIYUAN_CODING_AGENT_DIR = join(cwd, "agentDir");
+	try {
+		mkdirSync(join(cwd, "agentDir"), { recursive: true });
+		writeFileSync(join(cwd, "card.json"), JSON.stringify({ data: { name: "冷鹰", description: "公房里的院使", first_mes: "你来了。" } }));
+		writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "怀瑾", lorebooks: [] }));
+
+		// 模拟历史遗留：旧底稿把世界书当成无主条目抄进了 AGENTS.md（带有 "# 世界设定（常驻事实）" 与无后缀小节）
+		const legacyWithOrphan = [
+			"# 你扮演的角色：冷鹰",
+			"公房里的院使",
+			"",
+			"# 世界设定（常驻事实）",
+			"## 旧门派设定",
+			"旧世界的门派，源文件已被删。",
+			"",
+			"# 卡作者末端指令",
+			"每拍留钩子。",
+			"",
+			"## 某预设规则（预设）",
+			"预设内容。",
+		].join("\n");
+		writeFileSync(cardAgentsPath(cwd), legacyWithOrphan, "utf8");
+
+		// 此时未挂载世界书，执行镜像同步
+		const r = syncLorebookMirror(cwd);
+		assert.equal(r.state, "written");
+		assert.equal(r.entries, 0);
+
+		const cleaned = readFileSync(cardAgentsPath(cwd), "utf8");
+		assert.doesNotMatch(cleaned, /世界设定/, "无主的世界设定大标题被彻底剥除");
+		assert.doesNotMatch(cleaned, /旧门派设定/, "无主的世界书条目被彻底剥除");
+		assert.doesNotMatch(cleaned, /旧世界的门派/, "无主正文被彻底剥除");
+		assert.ok(cleaned.includes("公房里的院使"), "卡自身描述保留");
+		assert.ok(cleaned.includes("# 卡作者末端指令\n每拍留钩子。"), "卡作者末端指令保留");
+		assert.ok(cleaned.includes("## 某预设规则（预设）"), "预设条目保留");
+	} finally {
+		delete process.env.LIYUAN_CODING_AGENT_DIR;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});

@@ -7,7 +7,7 @@
  * 剧情向压缩接管 → 每轮后场记记账 + 一致性审计（旁侧模型，D10：产出是数据与告警，绝不碰正文）。
  */
 
-import { existsSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { extname, isAbsolute, join } from "node:path";
@@ -15,6 +15,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@liyuan/age
 import { publishStageConnection, type StageHooks } from "../../src/stage/bridge.ts";
 import { completeSimple } from "@liyuan/ai/compat";
 import { Type } from "typebox";
+import { StoryHistory, listStoryFiles, storyDirectory } from "../../src/stage/story-history.ts";
 
 import { loadCardFile } from "../../src/card.ts";
 import { buildImportBlock, cleanChat, DEFAULT_STRIP_TAGS, parseStChat, serializeForImportSummary } from "../../src/chatlog.ts";
@@ -1393,20 +1394,23 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 		description: cmdDesc("rewind"),
 		handler: async (args, ctx) => {
 			const n = Math.max(1, Number.parseInt((args ?? "").trim(), 10) || 1);
-			// agent 子项目不给树导航（docs/PLAN-AGENT-CODING.md §4.3）：回退走稿子视图的检查点恢复
-			if (chatModeOfSessionDir(ctx.sessionManager.getSessionDir()) === "agent") {
-				notify(ctx, "agent 项目没有 /rewind：在稿子视图的「历史」里恢复到某个检查点。", "error");
-				return;
-			}
-			const branch = storyBranch(ctx.sessionManager.getBranch()) as Array<{
+			const isAgent = chatModeOfSessionDir(ctx.sessionManager.getSessionDir()) === "agent";
+			const rawBranch = ctx.sessionManager.getBranch() as Array<{
 				id: string;
+				parentId?: string | null;
 				type: string;
 				message?: { role?: string };
 			}>;
-			// 只数剧情轮：戏外问答（场外标记）不是剧情，不计入 N（与 UI 楼层号同一语义）
+			const branch = (isAgent ? rawBranch : storyBranch(rawBranch)) as Array<{
+				id: string;
+				parentId?: string | null;
+				type: string;
+				message?: { role?: string };
+			}>;
+			// 只数用户轮
 			const userIdxs = branch
 				.map((e, i) =>
-					e.type === "message" && e.message?.role === "user" && !isBackstageText(extractText(e.message)) ? i : -1,
+					e.type === "message" && e.message?.role === "user" && (isAgent || !isBackstageText(extractText(e.message))) ? i : -1,
 				)
 				.filter((i) => i >= 0);
 			if (userIdxs.length < n) {
@@ -1414,10 +1418,42 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const targetUserIdx = userIdxs[userIdxs.length - n];
+			const targetUser = branch[targetUserIdx];
 			await waitForScribe();
-			// 导航到目标用户消息本身：leaf → 该 user 的 parent（保留开场白与更早轮次）。
-			// 旧实现 navigateTree(前一条) 在前一条为 greeting/custom 时会多退一层到 root。
-			const result = await ctx.navigateTree(branch[targetUserIdx].id, { summarize: false });
+			if (isAgent) {
+				const chatDir = chatDirOfSessionDir(ctx.sessionManager.getSessionDir());
+				if (chatDir) {
+					try {
+						const history = new StoryHistory(chatDir);
+						const all = history.list();
+						const hit = all.find((c) => c.turnId === targetUser.id);
+						if (hit) {
+							const idx = all.findIndex((c) => c.id === hit.id);
+							const fileTarget = all[idx - 1];
+							if (fileTarget) history.restore(fileTarget.id);
+							else {
+								for (const f of listStoryFiles(storyDirectory(chatDir))) {
+									try { rmSync(join(storyDirectory(chatDir), f.name)); } catch {}
+								}
+							}
+						}
+					} catch {}
+				}
+				// agent 模式：退到目标 user 的 parent（回到该次输入之前的状态）
+				const parent = targetUser.parentId ?? null;
+				if (parent === null) {
+					ctx.sessionManager.resetLeaf();
+					notify(ctx, `已回退 ${n} 轮，回到初始状态。`);
+				} else {
+					const result = await ctx.navigateTree(parent, { summarize: false });
+					if (!result.cancelled) {
+						notify(ctx, `已回退 ${n} 轮。被回退的内容保留在会话树里，从这里继续。`);
+					}
+				}
+				return;
+			}
+			// 扮演模式：导航到目标用户消息本身：leaf → 该 user 的 parent（保留开场白与更早轮次）。
+			const result = await ctx.navigateTree(targetUser.id, { summarize: false });
 			if (!result.cancelled) {
 				notify(ctx, `已回退 ${n} 个用户轮。被回退的内容保留在会话树里（可再导航回去），从这里继续。`);
 			}
@@ -1428,8 +1464,16 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	pi.registerCommand("drop", {
 		description: cmdDesc("drop"),
 		handler: async (_args, ctx) => {
-			const branch = storyBranch(ctx.sessionManager.getBranch()) as Array<{
+			const isAgent = chatModeOfSessionDir(ctx.sessionManager.getSessionDir()) === "agent";
+			const rawBranch = ctx.sessionManager.getBranch() as Array<{
 				id: string;
+				parentId?: string | null;
+				type: string;
+				message?: { role?: string; customType?: string };
+			}>;
+			const branch = (isAgent ? rawBranch : storyBranch(rawBranch)) as Array<{
+				id: string;
+				parentId?: string | null;
 				type: string;
 				message?: { role?: string; customType?: string };
 			}>;
@@ -1444,20 +1488,41 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 				notify(ctx, "没有可删除的角色回复（尚无用户消息）", "error");
 				return;
 			}
-			// 用户消息之后必须还有助手/开场等，否则没什么可 drop
+			// 用户消息之后必须还有助手/开场/报错等，否则没什么可 drop
 			const after = branch.slice(lastUserIdx + 1).some(
 				(e) =>
 					e.type === "message" &&
 					(e.message?.role === "assistant" || e.message?.role === "custom" || e.message?.role === "toolResult"),
 			);
 			if (!after) {
-				notify(ctx, "最后一轮还没有角色回复可删", "error");
+				notify(ctx, "最后一轮还没有回复可删", "error");
 				return;
 			}
 			await waitForScribe();
-			const result = await ctx.navigateTree(branch[lastUserIdx].id, { summarize: false });
+			const targetUserId = branch[lastUserIdx].id;
+			if (isAgent) {
+				const chatDir = chatDirOfSessionDir(ctx.sessionManager.getSessionDir());
+				if (chatDir) {
+					try {
+						const history = new StoryHistory(chatDir);
+						const all = history.list();
+						const hit = all.find((c) => c.turnId === targetUserId);
+						if (hit) {
+							const idx = all.findIndex((c) => c.id === hit.id);
+							const fileTarget = all[idx - 1];
+							if (fileTarget) history.restore(fileTarget.id);
+							else {
+								for (const f of listStoryFiles(storyDirectory(chatDir))) {
+									try { rmSync(join(storyDirectory(chatDir), f.name)); } catch {}
+								}
+							}
+						}
+					} catch {}
+				}
+			}
+			const result = await ctx.navigateTree(targetUserId, { summarize: false });
 			if (!result.cancelled) {
-				notify(ctx, "已删除最后一条角色回复；你的输入仍在，可编辑后发送或点「重新生成」。");
+				notify(ctx, isAgent ? "已删除最后一条讨论回复或报错；你的输入仍在，可编辑或点重新生成。" : "已删除最后一条角色回复；你的输入仍在，可编辑后发送或点「重新生成」。");
 			}
 		},
 	});

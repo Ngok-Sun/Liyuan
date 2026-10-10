@@ -40,6 +40,8 @@ export interface SandboxScope {
 	cwd: string;
 	/** 卡在 `cards/` 里时的卡目录；不在卡库里的卡为 undefined ⇒ 没有 `卡.json` 可落永久授权 */
 	cardDir?: string;
+	/** 当前会话所在的子项目绝对路径（如果存在） */
+	chatDir?: string;
 	/** 自由读写根（已取 realpath）：卡目录、创作目录 */
 	roots: string[];
 	/** 只读根（已取 realpath）：公共库、挂载的书文件 */
@@ -125,7 +127,11 @@ export function grantUnit(cwd: string, target: string): string {
 	return join(root, ...segs.slice(0, depth));
 }
 
-export function sandboxScope(cwd: string, config: { card: string; lorebook?: string; lorebooks?: string[] }): SandboxScope {
+export function sandboxScope(
+	cwd: string,
+	config: { card: string; lorebook?: string; lorebooks?: string[] },
+	chatDir?: string,
+): SandboxScope {
 	const cardAbs = resolve(cwd, config.card);
 	const space = resolveCardSpace(cwd, relative(cwd, cardAbs));
 	const roots = [space ? space.dir : dirname(cardAbs)];
@@ -138,7 +144,32 @@ export function sandboxScope(cwd: string, config: { card: string; lorebook?: str
 		...SHARED_LIBRARY_DIRS.map((d) => join(cwd, d)),
 		...mountedLorebookPaths(config).map((p) => resolve(cwd, p)),
 	];
-	return { cwd, cardDir: space?.dir, roots: roots.map(realExisting), readRoots: readRoots.map(realExisting) };
+	return {
+		cwd,
+		cardDir: space?.dir,
+		chatDir: chatDir ? realExisting(chatDir) : undefined,
+		roots: roots.map(realExisting),
+		readRoots: readRoots.map(realExisting),
+	};
+}
+
+/**
+ * 目标路径是否落在同一张卡下的其他独立子项目中（或者试图探测整个对话库根）。
+ * 一张卡下每个子项目是独立的叙事/正文工程，绝对禁止跨项目访问（读写/列出均禁止）。
+ */
+export function isOtherChatPath(cardDir: string | undefined, currentChatDir: string | undefined, target: string): boolean {
+	if (!cardDir || !currentChatDir) return false;
+	const cardRoot = realExisting(cardDir);
+	const currentRoot = realExisting(currentChatDir);
+	const rel = relative(cardRoot, target);
+	if (!rel || isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) return false;
+	const segs = rel.split(sep);
+	if (segs[0] !== CHATS_DIR) return false;
+	// 目标就在 "对话" 目录本身（例如 ls 对话，列出所有子项目）
+	if (segs.length === 1) return true;
+	const targetChatDir = join(cardRoot, segs[0], segs[1]);
+	// 目标属于其他子项目
+	return targetChatDir !== currentRoot && !insidePath(currentRoot, target);
 }
 
 /**
@@ -158,6 +189,9 @@ export function sandboxVerdict(tool: string, input: Record<string, unknown>, sco
 	if (!access) return { kind: "allow" };
 	if (access === "bash") return grants.bash ? { kind: "allow" } : { kind: "ask-bash", command: String(input.command ?? "") };
 	const target = realExisting(sandboxTarget(tool, input, scope.cwd)!);
+	if (isOtherChatPath(scope.cardDir, scope.chatDir, target)) {
+		return { kind: "deny", reason: `${display(scope.cwd, target)} 属于其他独立项目，当前项目无权访问。` };
+	}
 	if (access === "write" && harnessManagedPath(scope.cardDir, target)) {
 		return { kind: "deny", reason: `${display(scope.cwd, target)} 属于梨园管理的数据（快照仓 / 会话树），原生 ${tool} 不能写。` };
 	}
@@ -257,6 +291,7 @@ export function describeAsk(v: Exclude<SandboxVerdict, { kind: "allow" } | { kin
 export interface SandboxGateDeps {
 	cwd: string;
 	config: { card: string; lorebook?: string; lorebooks?: string[] };
+	chatDir?: string;
 	sessionGrants: () => SandboxGrants;
 	rememberSession: (grant: SandboxGrant) => void;
 	/** 宿主的选择卡；缺省＝无法询问 ⇒ 卡外一律拒绝 */
@@ -274,7 +309,7 @@ export function createSandboxGate(deps: SandboxGateDeps): (tool: string, input: 
 	let scope: SandboxScope | undefined;
 	return async (tool, input) => {
 		if (!(tool in NATIVE_TOOL_ACCESS)) return undefined;
-		scope ??= sandboxScope(deps.cwd, deps.config);
+		scope ??= sandboxScope(deps.cwd, deps.config, deps.chatDir);
 		const session = deps.sessionGrants();
 		const perm = permanentGrants(deps.cwd, scope.cardDir);
 		const v = sandboxVerdict(tool, input, scope, { dirs: [...session.dirs, ...perm.dirs], bash: session.bash || perm.bash });

@@ -49,9 +49,9 @@ export const RP_COMMANDS: CommandMeta[] = [
 	{
 		name: "rewind",
 		usage: "/rewind [N]",
-		description: "回退 N 个用户轮重玩（默认 1；世界状态同步回退）",
+		description: "回退 N 个用户轮（默认 1；撤销本轮讨论与正文改动）",
 		takesArgs: true,
-		mode: "roleplay",
+		mode: "all",
 	},
 	{
 		name: "drop",

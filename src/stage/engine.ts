@@ -5,7 +5,7 @@
  * 本层保留 RP 的拍级队列、稿纸、合并、媒体与旁路工作，不再自持模型循环。
  */
 
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 
 import { applyProjectedSamplers } from "../samplers.ts";
@@ -970,7 +970,8 @@ export class StageEngine {
 		// 第二步·跨会话记忆（读侧）：卡的常驻摘要与这局的前情共用【前情提要】槽位——
 		// 两者语义同为「更早剧情的既定事实」，本局摘要在前、往局记忆在后。摘要是数据块，
 		// 走既有通道与既有语义句（铁律一/二：零新增文案、零新增注入点）；预算在 card-memory。
-		const residentSummary = authoringTurn && !agentTurn ? undefined : this.#residentSummary(sm, summary, state, rosterIndex);
+		// authoring 与 agent 模式下每个子项目是独立工程，绝不引入卡级跨项目常驻摘要。
+		const residentSummary = authoringTurn ? undefined : this.#residentSummary(sm, summary, state, rosterIndex);
 		// agent 模式的项目状态块（docs/PLAN-AGENT-CODING.md §六）：与扮演同一份数据，多带稿子目录（不带正文）；每次装配现读目录。
 		const agentStateBlock = (): string => buildAgentStateBlock({ state, rosterIndex, summary, residentSummary, files: listStoryFiles(storyDir!) });
 
@@ -1282,6 +1283,7 @@ export class StageEngine {
 		// 允许集按本拍的卡算一次；授权现读——本会话的在树上，永久的在 卡.json。
 		const sandboxGate = createSandboxGate({
 			cwd, config,
+			chatDir: chatDir ?? undefined,
 			sessionGrants: () => sandboxGrantsFromBranch(sm.getBranch() as BranchEntryLike[]),
 			rememberSession: (grant) => { sm.appendCustomEntry(SANDBOX_GRANT_TYPE, grant); sm.flush(); },
 			ask: this.#deps.askUser ? (question, options) => this.#deps.askUser!(question, options, this.#abort?.signal) : undefined,
@@ -1818,6 +1820,7 @@ export class StageEngine {
 		/** 台上补充设定集路径（写侧落点；卡未装载时为空＝无 lorebook_write） */
 		const chatDir = chatDirOfSessionDir(sm.getSessionDir?.());
 		const cardDir = chatDir ? cardDirOfChatDir(chatDir) : null;
+		const chatId = chatDir ? basename(chatDir) : undefined;
 		const overlayOf = (): string => {
 			try {
 				const m = loadStageMaterials(cwd);
@@ -1863,21 +1866,21 @@ export class StageEngine {
 					const r = search ? await search(sm.getSessionId(), query) : { hits: [], sources: [{ scope: "session", status: "unavailable" as const }] };
 					result = Array.isArray(r) ? { hits: r, sources: [{ scope: "session", status: "ok" }] } : r;
 				} catch (e) { result = { hits: [], sources: [{ scope: "session", status: "error", error: e instanceof Error ? e.message : String(e) }] }; }
-				if (cardDir) {
-					try { result.hits.push(...searchCardMemory(cardDir, query)); result.sources.push({ scope: "card", status: "ok" }); }
+				if (cardDir && this.mode !== "agent") {
+					try { result.hits.push(...searchCardMemory(cardDir, query, 6, chatId)); result.sources.push({ scope: "card", status: "ok" }); }
 					catch (e) { result.sources.push({ scope: "card", status: "error", error: String(e) }); }
-				} else result.sources.push({ scope: "card", status: "unavailable" });
+				} else if (!cardDir || this.mode === "agent") result.sources.push({ scope: "card", status: "unavailable" });
 				return result;
 			},
-			...(this.#deps.readMemory || cardDir ? { readMemory: (ref: string) => ref.startsWith("card:")
-				? cardDir ? readCardMemory(cardDir, ref) : undefined : this.#deps.readMemory?.(sm.getSessionId(), ref) } : {}),
-			...(cardDir ? { updateMemory: (ref: string, version: string, content: string) => changeCardMemory(cardDir, ref, version, content)! } : {}),
+			...(this.#deps.readMemory || (cardDir && this.mode !== "agent") ? { readMemory: (ref: string) => ref.startsWith("card:")
+				? cardDir ? readCardMemory(cardDir, ref, chatId) : undefined : this.#deps.readMemory?.(sm.getSessionId(), ref) } : {}),
+			...(cardDir && this.mode !== "agent" ? { updateMemory: (ref: string, version: string, content: string) => changeCardMemory(cardDir, ref, version, content)! } : {}),
 			// ---- M-D3 向量库写侧：scope 由宿主绑定，模型只给内容（作用域不经模型） ----
 			...(this.#deps.addMemory
 				? { addMemory: (input: { text: string; title?: string }) => this.#deps.addMemory!(sm.getSessionId(), input) }
 				: {}),
-			...(this.#deps.listMemory || cardDir
-				? { listMemory: (storeId: string) => storeId === "card" ? (cardDir ? listCardMemory(cardDir).map((d) => ({ ...d, id: d.ref })) : []) : this.#deps.listMemory?.(sm.getSessionId(), storeId) ?? [] }
+			...(this.#deps.listMemory || (cardDir && this.mode !== "agent")
+				? { listMemory: (storeId: string) => storeId === "card" ? (cardDir ? listCardMemory(cardDir, chatId).map((d) => ({ ...d, id: d.ref })) : []) : this.#deps.listMemory?.(sm.getSessionId(), storeId) ?? [] }
 				: {}),
 			...(this.#deps.deleteMemory || cardDir
 				? { deleteMemory: (storeId: string, id: string, version?: string) => {

@@ -149,9 +149,9 @@ import { chapterTitle, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, stor
 import { sameCardPath } from "../src/paths.ts";
 import { readSessionCardInfo } from "../src/session-scan.ts";
 import { t } from "../src/i18n/index.ts";
-import { cardDirOfChatDir, cardFileIn, chatDataPath, chatDirOfSessionDir, createChat, loadCardConfig, mergeCardConfig, resolveCardSpace } from "../src/cardspace.ts";
+import { cardDirOfChatDir, cardFileIn, chatDataPath, chatDirOf, chatDirOfSessionDir, chatModeOfSessionDir, chatSessionsDirOf, createChat, loadCardConfig, mergeCardConfig, resolveCardSpace } from "../src/cardspace.ts";
 import { chatSessionsOf, chatsOfCard, ensureStorySessionDir, newChatSessionDir, storySessionTarget } from "../src/story-guide.ts";
-import { syncCardMemory } from "../src/card-memory.ts";
+import { loadManifest, memoryPaths, saveManifest, syncCardMemory } from "../src/card-memory.ts";
 import { alreadyMigrated, applyCardMigration, planCardMigration, planOrphanSessions, promoteStagedCard } from "../src/migrate-cards.ts";
 import {
 	appendLorebookFileEntry,
@@ -729,8 +729,20 @@ const extractEntryText = (content: unknown): string => {
  */
 let rerollFallbackLeaf: string | null = null;
 
-/** 当前分支上最后一条剧情用户消息 entry id（戏外轮不计） */
+/** 当前分支上最后一条用户消息 entry id（agent 模式查全部分支 user；roleplay 模式查剧情轮） */
 const lastStoryUserId = (): string | null => {
+	const isAgent = stage?.mode === "agent";
+	if (isAgent) {
+		const rawBranch = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
+		for (let i = rawBranch.length - 1; i >= 0; i--) {
+			const e = rawBranch[i];
+			if (e.type === "message" && e.message && typeof e.message === "object") {
+				const m = e.message as { role?: unknown };
+				if (m.role === "user" && typeof e.id === "string") return e.id;
+			}
+		}
+		return null;
+	}
 	const branch = storyBranch(session.sessionManager.getBranch()) as unknown as Array<Record<string, unknown>>;
 	const lite = branch.map((e) => {
 		const type = String(e.type);
@@ -1051,6 +1063,24 @@ const regenerateSwipe = async (): Promise<void> => {
 	const sm = session.sessionManager;
 	// 记录 reroll 前的叶：生成失败/停止无产出时回退到旧回复（8/05：reroll 链上停止，前版本全消失）
 	rerollFallbackLeaf = sm.getLeafId();
+	if (stage?.mode === "agent") {
+		const chatDir = agentChatDir();
+		if (chatDir) {
+			const history = new StoryHistory(chatDir);
+			const all = history.list();
+			const hit = all.find((c) => c.turnId === userId);
+			if (hit) {
+				const idx = all.findIndex((c) => c.id === hit.id);
+				const fileTarget = all[idx - 1];
+				if (fileTarget) history.restore(fileTarget.id);
+				else {
+					for (const f of listStoryFiles(storyDirectory(chatDir))) {
+						try { rmSync(join(storyDirectory(chatDir), f.name)); } catch {}
+					}
+				}
+			}
+		}
+	}
 	// 叶钉回 user：引擎在 user 下挂新的 assistant sibling（swipe 语义）。
 	// 世界状态/历史均为 f(分支)（R3/R4），无需旧的 navigateTree 恢复舞蹈——
 	// 废弃分支上的场记快照天然不在新分支上，账本不会泄漏（8/02 A 雷的结构性解法）。
@@ -1863,6 +1893,78 @@ const restHost: RestHost = {
 		const d = chatDirOfSessionDir(session.sessionManager.getSessionDir());
 		return d ? basename(d) : null;
 	},
+	async deleteChat(chatId) {
+		const space = resolveCardSpace(cwd, cardPath);
+		if (!space) throw new Error(t("当前卡不在 cards/（老布局没有对话层）"));
+		const cardDir = space.dir;
+		const targetDir = chatDirOf(cardDir, chatId);
+		if (!existsSync(targetDir)) throw new Error(t("子项目不存在：{id}", { id: chatId }));
+
+		// 1. 若删除的是当前打开的子项目：先切到其它项目，或建新项目切过去
+		const curChatDir = chatDirOfSessionDir(session.sessionManager.getSessionDir());
+		if (curChatDir && basename(curChatDir) === chatId) {
+			const allChats = chatsOfCard(cwd, cardPath) ?? [];
+			const other = allChats.find((c) => c.id !== chatId);
+			if (other) {
+				const otherSessions = chatSessionsOf(cwd, cardPath)?.filter((s) => s.chatId === other.id) ?? [];
+				if (otherSessions[0]) {
+					await runtime.switchSession(otherSessions[0].path);
+				} else {
+					const previousSessionFile = session.sessionFile;
+					await runtime.dispose();
+					runtime = await createAgentSessionRuntime(createRuntime, {
+						cwd,
+						agentDir: getAgentDir(),
+						sessionManager: SessionManager.create(cwd, other.sessionsDir),
+						sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
+					});
+					wireRuntimeHooks();
+					await bindSession();
+				}
+			} else {
+				// 唯一项目：新建一个干净的项目并切入（保持同模式）
+				const mode = chatModeOfSessionDir(chatSessionsDirOf(cardDir, chatId));
+				const freshDir = newChatSessionDir(cwd, cardPath, undefined, mode === "agent" ? "agent" : undefined);
+				if (!freshDir) throw new Error(t("无法创建新子项目作为落脚点"));
+				const previousSessionFile = session.sessionFile;
+				await runtime.dispose();
+				runtime = await createAgentSessionRuntime(createRuntime, {
+					cwd,
+					agentDir: getAgentDir(),
+					sessionManager: SessionManager.create(cwd, freshDir),
+					sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
+				});
+				wireRuntimeHooks();
+				await bindSession();
+			}
+		}
+
+		// 2. 物理删除整个子项目目录（正文、历史、会话、状态、面板、向量记忆）
+		rmSync(targetDir, { recursive: true, force: true });
+
+		// 3. 物理删除卡级跨会话复盘与记忆残留
+		const p = memoryPaths(cardDir);
+		const recapFile = p.recapOf(chatId);
+		if (existsSync(recapFile)) {
+			try { unlinkSync(recapFile); } catch {}
+		}
+		const manifest = loadManifest(cardDir);
+		if (manifest.recaps[chatId]) {
+			delete manifest.recaps[chatId];
+		}
+		manifest.manual ??= { protectedRefs: [], forgottenChats: [], supersededRecaps: {}, aggregatePinned: false, epoch: 0 };
+		if (!manifest.manual.forgottenChats.includes(chatId)) {
+			manifest.manual.forgottenChats.push(chatId);
+		}
+		saveManifest(cardDir, manifest);
+
+		// 4. 触发记忆同步与遗忘
+		runCardMemorySync(cardDir);
+
+		// 5. 广播会话树刷新
+		resyncAll();
+		broadcast(await listSessions());
+	},
 	async renameSession(path, name) {
 		await assertListedSession(path);
 		const clean = name.replace(/[\r\n]+/g, " ").trim();
@@ -1902,6 +2004,8 @@ const restHost: RestHost = {
 		unlinkSync(path);
 		cardCache.delete(path);
 		previewCache.delete(path);
+		// 会话文件被删后，触发记忆同步（子项目指纹变动，更新复盘）
+		syncMemoryForSession();
 	},
 	// 删卡「相关数据」用：删除绑定某张卡的全部会话文件（rp-card 标记匹配）。
 	// 调用方须保证当前打开的会话已不属于该卡（删当前卡先切走再调本方法）。
@@ -3299,9 +3403,54 @@ wss.on("connection", (ws, req) => {
 					}
 					case "reroll": {
 						if (refuseWhileStreaming(ws, t("重新生成"))) return;
-						const t = String(frame.text ?? "").trim();
+						const tText = String(frame.text ?? "").trim();
+						if (stage?.mode === "agent") {
+							const userId = lastStoryUserId();
+							if (!userId) {
+								broadcast({ type: "notify", level: "error", text: t("没有可重新生成的用户输入") });
+								break;
+							}
+							const rawBranch = session.sessionManager.getBranch() as Array<{ id?: string; parentId?: string | null }>;
+							const userEntry = rawBranch.find((e) => e.id === userId);
+							if (!userEntry) {
+								broadcast({ type: "notify", level: "error", text: t("没有可重新生成的用户输入") });
+								break;
+							}
+							const chatDir = agentChatDir();
+							if (chatDir) {
+								const history = new StoryHistory(chatDir);
+								const all = history.list();
+								const hit = all.find((c) => c.turnId === userId);
+								if (hit) {
+									const idx = all.findIndex((c) => c.id === hit.id);
+									const fileTarget = all[idx - 1];
+									if (fileTarget) history.restore(fileTarget.id);
+									else {
+										for (const f of listStoryFiles(storyDirectory(chatDir))) {
+											try { rmSync(join(storyDirectory(chatDir), f.name)); } catch {}
+										}
+									}
+								}
+							}
+							if (tText) {
+								const parent = userEntry.parentId ?? null;
+								if (parent === null) session.sessionManager.resetLeaf();
+								else session.setLeaf(parent);
+								resyncAll();
+								broadcast({
+									type: "message",
+									message: { channel: "user", name: names.userName, text: tText, mode: "agent" },
+								});
+								await stage.performTurn(tText);
+							} else {
+								session.setLeaf(userId);
+								resyncAll();
+								await stage.regenerate();
+							}
+							break;
+						}
 						// 无参 = ST sibling 变体；有参 = 改用户文案后整轮重来（扩展 /reroll）
-						await handlePrompt(t ? `/reroll ${t}` : "/reroll");
+						await handlePrompt(tText ? `/reroll ${tText}` : "/reroll");
 						break;
 					}
 					case "swipe": {

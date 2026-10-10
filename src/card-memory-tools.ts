@@ -20,28 +20,29 @@ function documents(cardDir: string): Array<{ ref: string; path: string; chatId?:
 		...recaps.map((n) => ({ ref: `card:recap:${n.slice(0, -3)}`, path: join(p.recapsDir, n), chatId: n.slice(0, -3) }))];
 }
 
-export function listCardMemory(cardDir: string): MemoryDocument[] {
+export function listCardMemory(cardDir: string, currentChatId?: string): MemoryDocument[] {
 	const manifest = loadManifest(cardDir);
 	return documents(cardDir).flatMap((doc) => {
 		const text = raw(doc.path);
 		if (text === undefined) return [];
 		const version = memoryTextVersion(text);
 		if (doc.chatId && (manifest.manual?.forgottenChats.includes(doc.chatId) || manifest.manual?.supersededRecaps[doc.chatId] === version)) return [];
+		if (doc.chatId && currentChatId && doc.chatId !== currentChatId) return [];
 		return [{ ref: doc.ref, version, text, meta: { title: basename(doc.path), fileName: basename(doc.path), source: "card-markdown", scope: doc.chatId ? "card-chat-recap" : "card", ...(doc.chatId ? { chatId: doc.chatId } : {}) },
 			...(manifest.manual?.protectedRefs.includes(doc.ref) ? { note: "手工记忆，自动同步不会覆盖。" } : {}) }];
 	});
 }
 
-export function readCardMemory(cardDir: string, ref: string): MemoryDocument | undefined {
-	const docs = listCardMemory(cardDir);
+export function readCardMemory(cardDir: string, ref: string, currentChatId?: string): MemoryDocument | undefined {
+	const docs = listCardMemory(cardDir, currentChatId);
 	const doc = docs.find((d) => d.ref === ref);
 	return doc ? { ...doc, relatedRefs: docs.filter((d) => d.ref !== ref).map((d) => d.ref) } : undefined;
 }
 
-export function searchCardMemory(cardDir: string, query: string, limit = 6): MemoryHitLike[] {
+export function searchCardMemory(cardDir: string, query: string, limit = 6, currentChatId?: string): MemoryHitLike[] {
 	const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
 	if (!words.length) return [];
-	return listCardMemory(cardDir).flatMap((doc) => {
+	return listCardMemory(cardDir, currentChatId).flatMap((doc) => {
 		const lower = doc.text.toLocaleLowerCase();
 		const matches = words.map((w) => lower.indexOf(w)).filter((i) => i >= 0);
 		if (!matches.length) return [];

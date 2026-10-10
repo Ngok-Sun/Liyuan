@@ -1296,17 +1296,19 @@ export default function App() {
 
 	const rewindAgentTurn = useCallback(() => {
 		if (busy) return;
-		if (!storyCheckpoints || storyCheckpoints.length === 0) {
-			pushToast("warning", t("尚无检查点可回退"));
+		const latest = storyCheckpoints && storyCheckpoints.length > 0 ? storyCheckpoints[storyCheckpoints.length - 1] : null;
+		if (latest) {
+			const q = t("文件和讨论一起回退到「{msg}」之前？\n撤销本轮改动，讨论也将回到该轮输入之前。", { msg: latest.message });
+			if (window.confirm(q)) {
+				ws.send({ type: "story_restore", checkpointId: latest.id, scope: "both" });
+			}
 			return;
 		}
-		const latest = storyCheckpoints[storyCheckpoints.length - 1];
-		if (!latest) return;
-		const q = t("文件和讨论一起回退到「{msg}」之前？\n撤销本轮改动，讨论也将回到该轮输入之前。", { msg: latest.message });
+		const q = t("撤销本轮输入与讨论？\n讨论将回到本轮输入之前。");
 		if (window.confirm(q)) {
-			ws.send({ type: "story_restore", checkpointId: latest.id, scope: "both" });
+			ws.send({ type: "prompt", text: "/rewind 1" });
 		}
-	}, [busy, storyCheckpoints, ws, pushToast]);
+	}, [busy, storyCheckpoints, ws]);
 
 	const send = useCallback(() => {
 		const typed = input.trim();
@@ -2501,11 +2503,12 @@ export default function App() {
 												skin={cardSkin}
 												onChapter={agentSplit || conversationMode === "agent" ? (checkpointId) => { setStoryFocus({ checkpointId, tick: Date.now() }); setStoryTab("story"); } : undefined}
 												onReroll={
-													!busy &&
-													!msgEdit &&
-													b.msg.channel === "narrative" &&
-													b.idx === lastNarrativeIdx
-														? () => ws.send({ type: "swipe", dir: "new" })
+													!busy && !msgEdit
+														? b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
+															? () => { ws.send({ type: "swipe", dir: "new" }); }
+															: isAgentMode && b.msg.channel === "authoring" && b.idx === lastNarrativeIdx
+																? () => { ws.send({ type: "reroll" }); }
+																: undefined
 														: undefined
 												}
 												swipe={

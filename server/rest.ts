@@ -302,6 +302,7 @@ export interface RestHost {
 	// ---- 会话管理（PLAN-PANELS §2.1，main.ts 实现） ----
 	/** 当前子项目 id（chats 删除守卫用）；老布局 null */
 	currentChatId(): string | null;
+	deleteChat(chatId: string): Promise<void>;
 	sessions(): Promise<SessionInfoLite[]>;
 	renameSession(path: string, name: string): Promise<void>;
 	deleteSession(path: string): Promise<void>;
@@ -1387,12 +1388,12 @@ export async function syncPresetTranslation(
 	};
 	const r = translatePresetWithDeclaration(doc, declaration, macro);
 
-	// 无档案的卡：投影打底（带世界书来源标注）——档案一落盘卡即进文件模式（刀3），投影就是原本要喂的内容
+	// 无档案的卡：投影打底——档案一落盘卡即进文件模式（刀3）。
+	// 投影底稿只给卡自己的内容（世界书由紧随其后的 syncLorebookMirror 独立镜像持有，不硬编码抄进档案）
 	let agentsBase = "";
 	if (!existsSync(agentsAbs) && r.agentsSection) {
 		const materials = loadStageMaterials(cwd);
-		const bookOf = bookOfEntries(mountedLorebookPaths(config).map((rel) => resolvePath(cwd, rel)));
-		agentsBase = projectCardToAgents(materials.card, constantLoreOf(materials), config, { bookOf });
+		agentsBase = projectCardToAgents(materials.card, [], config);
 	}
 	const a = mergePresetEntriesInto(appendPath, r.appendMarkdown, "");
 	const b = mergePresetEntriesInto(agentsAbs, r.agentsSection, agentsBase);
@@ -1421,6 +1422,36 @@ export async function syncPresetTranslation(
  * （与台上同一份：用户停用、协议判定、MVU 规则归属都已应用）重新落。文件就是实时的，条目视图看得见。
  * 档案不在场 ⇒ 台上本就从挂载书现场装配，无事可做。
  */
+/**
+ * 剥离可能由旧投影抄入档案的 `# 世界设定（常驻事实）` 大节及其下属无主条目。
+ * 世界书内容只应由 syncLorebookMirror 以带后缀条目形态动态持有，不应有静态大节残留。
+ */
+export function stripWorldSettingsSection(md: string): string {
+	const lines = md.split(/\r?\n/);
+	const out: string[] = [];
+	let inside = false;
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("#") && !trimmed.startsWith("##")) {
+			// 一级大标题
+			if (/^#\s+世界设定(?:（常驻事实）)?/.test(trimmed)) {
+				inside = true;
+				continue;
+			} else {
+				inside = false;
+			}
+		}
+		// 如果在世界设定大节内部，且遇到了属于预设的条目（带（预设）后缀），退出该大节保护预设
+		if (inside && /##.*（预设）/.test(trimmed)) {
+			inside = false;
+		}
+		if (!inside) {
+			out.push(line);
+		}
+	}
+	return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function syncLorebookMirror(cwd: string): { state: "none" | "unchanged" | "written"; entries: number } {
 	const config = loadConfig(cwd);
 	const agentsAbs = cardAgentsPath(dirname(resolvePath(cwd, config.card)));
@@ -1435,7 +1466,8 @@ export function syncLorebookMirror(cwd: string): { state: "none" | "unchanged" |
 		mirror.push(formatEntry(uniqueEntryName(title, lorebookSourceSuffix(book), used), e.content));
 	}
 	const raw = readFileSync(agentsAbs, "utf8");
-	const stripped = stripEntriesWhere(raw, (e) => e.source?.kind === "lorebook");
+	const strippedLore = stripEntriesWhere(raw, (e) => e.source?.kind === "lorebook");
+	const stripped = stripWorldSettingsSection(strippedLore);
 	let next = stripped;
 	if (mirror.length > 0) next = stripped.trim() ? `${stripped.trimEnd()}\n\n${mirror.join("\n")}` : mirror.join("\n");
 	next = next.trim() ? `${next.trim()}\n` : "";
@@ -1566,12 +1598,12 @@ async function syncPresetProcess(
 	}
 
 	const entries = processIntoEntries(store, macro);
-	// 无档案的卡：投影打底（带世界书来源标注）——档案一落盘卡即进文件模式（刀3）
+	// 无档案的卡：投影打底——档案一落盘卡即进文件模式（刀3）。
+	// 投影底稿只给卡自己的内容（世界书由紧随其后的 syncLorebookMirror 独立镜像持有，不硬编码抄进档案）
 	let agentsBase = "";
 	if (!existsSync(agentsAbs) && entries.agentsSection) {
 		const materials = loadStageMaterials(cwd);
-		const bookOf = bookOfEntries(mountedLorebookPaths(config).map((rel) => resolvePath(cwd, rel)));
-		agentsBase = projectCardToAgents(materials.card, constantLoreOf(materials), config, { bookOf });
+		agentsBase = projectCardToAgents(materials.card, [], config);
 	}
 	const a = mergePresetEntriesInto(appendPath, entries.appendMarkdown, "");
 	const b = mergePresetEntriesInto(agentsAbs, entries.agentsSection, agentsBase);
@@ -2863,15 +2895,12 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				sendJson(res, 200, { ok: true, ...r });
 				return true;
 			}
-			// 删除整个子项目（含全部对话与世界状态）；当前项目拒删（先切走再删）
+			// 删除整个子项目（含全部对话、正文、快照与卡级记忆遗忘；支持平滑删除当前项目）
 			case "DELETE /api/chats": {
 				const chatId = (query.get("chatId") ?? "").trim();
 				if (!chatId) throw new Error(t("缺少 chatId"));
 				if (!chatIdOk(chatId)) throw new Error(t("chatId 不合法"));
-				const space = resolveCardSpace(host.cwd, loadConfig(host.cwd).card);
-				if (!space) throw new Error(t("当前卡不在 cards/（老布局没有对话层）"));
-				if (host.currentChatId() === chatId) throw new Error(t("当前项目不能删（先切到别的项目再删它）"));
-				deleteChat(space.dir, chatId);
+				await host.deleteChat(chatId);
 				sendJson(res, 200, { ok: true });
 				return true;
 			}
@@ -3798,14 +3827,17 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				unlinkSync(abs);
 				const config = loadConfig(host.cwd);
 				const active = mountedLorebookPaths(config);
-				if (active.includes(p)) {
-					const next = setMountedLorebooks(
-						config,
-						active.filter((x) => x !== p),
-					);
+				const isTarget = (item: string) => {
+					const clean = item.replace(/\\/g, "/");
+					return clean === p || resolvePath(host.cwd, clean) === abs;
+				};
+				const remaining = active.filter((x) => !isTarget(x));
+				if (remaining.length !== active.length) {
+					const next = setMountedLorebooks(config, remaining);
 					writeJsonWithBackup(configPath(host.cwd), next);
-					await host.softRefreshConfig();
 				}
+				// 无论删除前是否挂载，删除后必须软刷新以对账 AGENTS.md 世界书镜像
+				await host.softRefreshConfig();
 				sendJson(res, 200, { ok: true });
 				return true;
 			}

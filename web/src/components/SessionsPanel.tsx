@@ -345,18 +345,16 @@ function ChatGroup({
 						>
 							<IconDownload size={14} />
 						</a>
-						{!isCurrent && (
-							<ConfirmButton
-								disabled={busy}
-								className="spv2-icon-btn spv2-del-btn"
-								title={t("删除整个项目（含全部对话与世界状态，不可恢复）")}
-								aria-label={t("删除项目")}
-								confirmText={t("删除")}
-								onConfirm={() => onDeleteChat(chat.id)}
-							>
-								<IconTrash size={14} />
-							</ConfirmButton>
-						)}
+						<ConfirmButton
+							disabled={busy}
+							className="spv2-icon-btn spv2-del-btn"
+							title={isCurrent ? t("删除当前项目（自动切至其它项目，不可恢复）") : t("删除整个项目（含全部对话与世界状态，不可恢复）")}
+							aria-label={t("删除项目")}
+							confirmText={t("删除")}
+							onConfirm={() => onDeleteChat(chat.id)}
+						>
+							<IconTrash size={14} />
+						</ConfirmButton>
 					</span>
 				)}
 			</div>

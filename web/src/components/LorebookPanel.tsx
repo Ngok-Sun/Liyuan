@@ -24,12 +24,6 @@ import { bumpWatchPanels, ConfirmButton, Field, PanelStatus, SearchInput, Toggle
 import { IconMore } from "./icons.tsx";
 import { t } from "../i18n/index.ts";
 
-const SOURCE_LABEL: Record<LoreEntryView["source"], string> = {
-	card: "卡内嵌", // i18n-ignore：用时 t(SOURCE_LABEL[k])
-	file: "独立文件", // i18n-ignore
-	agent: "agent 补充", // i18n-ignore
-};
-
 type LoreSort = "book" | "name" | "chars" | "order";
 
 function parseKeyLine(s: string): string[] {
