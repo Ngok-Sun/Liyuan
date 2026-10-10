@@ -76,6 +76,7 @@ export const sessions: Record<string, string> = {
 	"导出项目（zip，含全部对话）": "Export project (zip with all chats)",
 	"导出项目": "Export project",
 	"删除整个项目（含全部对话与世界状态，不可恢复）": "Delete the whole project (all chats and world state; cannot be undone)",
+	"删除当前项目（自动切至其它项目，不可恢复）": "Delete the current project (automatically switches to another project; cannot be undone)",
 	"删除项目": "Delete project",
 	"展开显示": "Show more",
 	"点击进入当前对话": "Open the current chat",

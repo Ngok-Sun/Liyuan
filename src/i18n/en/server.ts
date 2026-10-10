@@ -158,5 +158,7 @@ export const server: Record<string, string> = {
 	"已保存检查点「{name}」": "Saved checkpoint “{name}”",
 	"回退检查点": "restoring a checkpoint",
 	"尚无检查点可回退": "No checkpoints available to restore",
+	"没有可重新生成的用户输入": "No user input available to regenerate",
+	"无法创建新子项目作为落脚点": "Failed to create a new project as landing point",
 	"已恢复文件并回到「{name}」之前": "Files restored and returned to before “{name}”",
 };

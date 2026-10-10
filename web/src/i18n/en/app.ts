@@ -100,7 +100,6 @@ export const app: Record<string, string> = {
 	"发送": "Send",
 	"请输入检查点存档说明（可选）：": "Please enter a checkpoint description (optional):",
 	"手动存档": "Manual save",
-	"尚无检查点可回退": "No checkpoints available to restore",
 	"文件和讨论一起回退到「{msg}」之前？\n撤销本轮改动，讨论也将回到该轮输入之前。": "Restore files and discussion to before “{msg}”?\nThis will revert this turn's changes and the discussion.",
 	"为当前正文与讨论保存一个检查点快照": "Save a checkpoint snapshot for the current prose and discussion",
 	"保存检查点": "Save checkpoint",

@@ -51,9 +51,6 @@ export const lore: Record<string, string> = {
 	"关键词（可选，供检索）": "Keys (optional, for search)",
 	"停用该条目": "Disable this entry",
 	"启用该条目": "Enable this entry",
-	"卡内嵌": "Card",
-	"独立文件": "File",
-	"agent 补充": "Agent",
 
 	// 世界书：书管理
 	"已卸下全部世界书": "All lorebooks unmounted",

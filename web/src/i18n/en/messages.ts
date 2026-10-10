@@ -197,4 +197,7 @@ export const messages: Record<string, string> = {
 	"编辑面板 {name}": "Edit panel {name}",
 	"Markdown 正文…": "Markdown text…",
 	"HTML 片段…": "HTML snippet…",
+	"撤销本轮输入与讨论？\n讨论将回到本轮输入之前。": "Revert this turn's input and discussion?\nThe discussion will return to before this turn's input.",
+	"重新生成本轮回复": "Regenerate this reply",
+	"重试": "Retry",
 };

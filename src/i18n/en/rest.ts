@@ -76,7 +76,6 @@ export const rest: Record<string, string> = {
 	"chatId 不合法": "Invalid chatId",
 	"缺少 chatId": "Missing chatId",
 	"缺少包体（.zip）": "Missing package body (.zip)",
-	"当前项目不能删（先切到别的项目再删它）": "The current project cannot be deleted (switch to another project first)",
 	"缺少 path": "Missing path",
 	"{file}（{message}）": "{file} ({message})",
 	"删除失败：{list}": "Delete failed: {list}",
