@@ -12,6 +12,7 @@ export type {
 	WireCheckpoint,
 	WireChatInfo,
 	WireChoice,
+	WireCompaction,
 	WireMsg,
 	WireSessionInfo,
 	WireStats,

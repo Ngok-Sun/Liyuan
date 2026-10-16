@@ -174,8 +174,8 @@ export interface RpConfig {
 	 * 触碰的目录/文件（工程根内存相对路径，根外存绝对路径）。会话级授权不在这里，在会话树条目里。
 	 */
 	sandboxAllow?: string[];
-	/** 工作模式沙箱：本卡永久允许 bash（bash 无法限制在卡目录内，批了就是批了整台机器的 shell） */
-	sandboxBash?: boolean;
+	/** 工作模式沙箱：本卡永久免问的 bash 命令前缀（归一化形态；默认首词，可在 卡.json 里改窄成 `git status`） */
+	sandboxBashAllow?: string[];
 }
 
 export const DEFAULT_CONFIG: RpConfig = {

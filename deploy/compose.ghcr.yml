@@ -36,6 +36,10 @@ services:
       - ./data/cards:/app/assets/cards
       - ./data/card-spaces:/app/cards
       - ./data/lorebooks:/app/assets/lorebooks
+      # 资料保护（刀3）：快照仓与回收站。这两个目录不在上面任何一个卷里，
+      # 不挂就是容器可写层——容器一重建就没了。
+      - liyuan-vault:/app/assets/.vault
+      - liyuan-trash:/app/assets/.回收站
     healthcheck:
       test:
         [
@@ -66,3 +70,5 @@ volumes:
   liyuan-personas-assets:
   liyuan-profiles:
   liyuan-skills-project:
+  liyuan-vault:
+  liyuan-trash:

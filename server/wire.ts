@@ -21,6 +21,8 @@ import type { CardProjectPreview } from "../src/card-authoring-types.ts";
 import { isBackstageText } from "../src/stance.ts";
 import { messageMode, type ConversationMode } from "../src/conversation-mode.ts";
 import { STORY_CHECKPOINT_TYPE } from "../src/stage/story-history.ts";
+import { DISCUSSION_SUMMARY_TYPE } from "../src/stage/discussion.ts";
+import { SUMMARY_ENTRY_TYPE } from "../src/stage/assemble.ts";
 import type { ActivityFileChange } from "../src/activity-format.ts";
 export type { ConversationMode };
 import { applyDraftOps, type DraftMsgLike } from "../src/draft.ts";
@@ -49,7 +51,9 @@ export type WireChannel =
 	/** 对话流内嵌 HTML（show_html 工具 / 正文 ```html 块） */
 	| "html"
 	/** agent 模式：本轮改动（检查点）的内联卡片（点击定位到稿子视图） */
-	| "chapter";
+	| "chapter"
+	/** 压缩记录卡片（rp-summary / liyuan-discussion-summary）：压了什么、摘要全文 */
+	| "compaction";
 
 /** agent 模式的稿子文件（docs/PLAN-AGENT-CODING.md §三；hello 带目录，正文经 GET /api/story） */
 export interface WireStoryFile {
@@ -138,6 +142,20 @@ export interface WireMsg {
 	greetingPick?: { index: number; total: number };
 	/** chapter 通道专用：写入/修订了哪一章 */
 	checkpoint?: WireCheckpoint;
+	/** compaction 通道专用：这次压缩覆盖了什么、摘要全文 */
+	compaction?: WireCompaction;
+}
+
+/** 压缩记录（对话流内联卡片）：kind 决定单位（轮/章），summary 是摘要全文（可展开读） */
+export interface WireCompaction {
+	kind: "discussion" | "story";
+	/** 覆盖的轮数（讨论）或章数（正文）；老条目缺省 */
+	turns?: number;
+	/** 被压掉的原文规模（字）；老条目缺省 */
+	chars?: number;
+	/** 正文侧：累计覆盖的文件数 */
+	covered?: number;
+	summary: string;
 }
 
 /**
@@ -312,7 +330,7 @@ export type ServerFrame =
 	| { type: "panels"; panels: RpPanel[] }
 	| { type: "stats"; stats: WireStats }
 	| { type: "notify"; level: "info" | "warning" | "error"; text: string }
-	| { type: "compaction"; state: "start" | "end"; ok?: boolean }
+	| { type: "compaction"; state: "start" | "end"; kind?: "discussion" | "story"; detail?: string; ok?: boolean }
 	| { type: "sessions"; list: WireSessionInfo[]; chats?: WireChatInfo[] }
 	/** 剧情决策询问（ask_director 停笔）：前端渲染选择卡，等用户应答 */
 	| { type: "choice"; id: string; question: string; options: string[]; placeholder?: string }
@@ -607,6 +625,11 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 		if (msg.customType === STORY_CHECKPOINT_TYPE) {
 			const cp = (msg.details as { checkpoint?: WireCheckpoint } | undefined)?.checkpoint;
 			return cp ? { channel: "chapter", text, checkpoint: cp } : null;
+		}
+		// 压缩记录卡片（main.ts branchMessages 由 rp-summary / liyuan-discussion-summary 条目投影而来）
+		if (msg.customType === SUMMARY_ENTRY_TYPE || msg.customType === DISCUSSION_SUMMARY_TYPE) {
+			const c = (msg.details as { rpCompaction?: WireCompaction } | undefined)?.rpCompaction;
+			return c ? { channel: "compaction", text: "", compaction: c } : null;
 		}
 		// 用户气泡「配音」写入的可展示音频（details.rpAudio；正文尽量不进 LLM 注意力，见 convert 侧仍可能带短标记）
 		if (msg.customType === "rp-audio") {

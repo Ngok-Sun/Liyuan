@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, afterEach } from "node:test";
+import { test, afterEach, after } from "node:test";
 import { createServer } from "node:http";
 
 import { ModelRuntime, createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type AgentSession } from "@liyuan/agent-runtime";
@@ -20,6 +20,10 @@ import { loadCardConfig } from "../src/cardspace.ts";
 import { loadCardFile } from "../src/card.ts";
 import { listReplyVariants } from "../src/swipe.ts";
 
+/** 沙箱每拍读 <agentDir>/BASH_DENYLIST.txt：把 agentDir 指到临时目录，测试不读用户本机 */
+const SANDBOX_AGENT_DIR = realpathSync(mkdtempSync(join(tmpdir(), "liyuan-eng-agent-")));
+process.env.LIYUAN_CODING_AGENT_DIR = SANDBOX_AGENT_DIR;
+after(() => rmSync(SANDBOX_AGENT_DIR, { recursive: true, force: true }));
 
 const sessions: AgentSession[] = [];
 const sessionByEngine = new WeakMap<StageEngine, AgentSession>();
@@ -721,7 +725,7 @@ test("工作模式沙箱：卡内静默；卡外读先拒后批、同单位不�
 			askUser: async (question, options) => { asked.push({ question, options }); return answers.shift(); },
 		}, false, true);
 		engine.setMode("authoring");
-		answers.push("拒绝", "本会话允许", "永久允许 bash（本卡）");
+		answers.push("拒绝", "本会话允许", "以后不再问「echo」（本卡）");
 		reg.setResponses([
 			() => calls(fauxToolCall("write", { path: join(cardDir, "创作", "note.txt"), content: "INSIDE_SENTINEL" })),
 			() => { assert.equal(asked.length, 0, "卡内写入不问"); return calls(fauxToolCall("read", { path: join(cwd, "web", "src", "a.ts") })); },
@@ -741,7 +745,7 @@ test("工作模式沙箱：卡内静默；卡外读先拒后批、同单位不�
 		assert.match(asked[0]!.question, /请求读取：.*a\.ts[\s\S]*范围：web/);
 		assert.deepEqual(asked[0]!.options, ["允许一次", "本会话允许", "永久允许（本卡）", "拒绝"]);
 		assert.match(asked[2]!.question, /bash 不受卡目录限制[\s\S]*echo SANDBOX_BASH_OK/);
-		assert.equal(loadCardConfig(cardDir).sandboxBash, true);
+		assert.deepEqual(loadCardConfig(cardDir).sandboxBashAllow, ["echo"], "免问前缀落 卡.json（不是布尔）");
 		assert.equal(loadCardConfig(cardDir).sandboxAllow, undefined, "本会话授权不落 卡.json");
 		assert.ok(sm.getBranch().some((e: any) => e.type === "custom" && e.customType === "liyuan-sandbox" && e.data?.dir === join(cwd, "web")), "本会话授权在会话树上");
 
@@ -751,6 +755,24 @@ test("工作模式沙箱：卡内静默；卡外读先拒后批、同单位不�
 			(ctx) => { assert.equal(asked.length, 3); assert.match(lastToolResult(ctx), /SANDBOX_BASH_THIRD/); return fauxAssistantMessage("再次完成。"); },
 		]);
 		await engine.performTurn("再看一眼。");
+
+		// 命令黑名单（docs/PLAN-AGENT-BACK-TO-PI.md §二）：即使 bash 已永久授权，命中即拒、不弹选择卡。
+		// 用一条无害规则验链路（真跑也只是 echo），不拿真灾难命令当测试。
+		writeFileSync(join(SANDBOX_AGENT_DIR, "BASH_DENYLIST.txt"), "echo SANDBOX_DENY_ME\n", "utf8");
+		try {
+			reg.setResponses([
+				(ctx) => { assert.match(lastToolResult(ctx), /SANDBOX_BASH_THIRD/); return calls(fauxToolCall("bash", { command: "echo SANDBOX_DENY_ME" })); },
+				(ctx) => {
+					assert.match(lastToolResult(ctx), /命令黑名单/, "命中黑名单的回执说明原因");
+					assert.doesNotMatch(lastToolResult(ctx), /SANDBOX_DENY_ME\n?$/, "命令没有执行");
+					assert.equal(asked.length, 3, "黑名单直接拒，不弹选择卡");
+					return fauxAssistantMessage("被拦住了。");
+				},
+			]);
+			await engine.performTurn("跑一下那条命令。");
+		} finally {
+			rmSync(join(SANDBOX_AGENT_DIR, "BASH_DENYLIST.txt"), { force: true });
+		}
 	} finally { reg.unregister(); rmSync(cwd, { recursive: true, force: true }); }
 });
 

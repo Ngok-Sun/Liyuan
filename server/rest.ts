@@ -11,7 +11,7 @@
 
 import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { gzipSync } from "node:zlib";
 
 import {
@@ -144,6 +144,7 @@ import {
 	translatePresetToRules,
 	translateReport,
 } from "../src/user-rules.ts";
+import { denylistContent, denylistPath, parseDenylist } from "../src/bash-denylist.ts";
 import {
 	declarePieceHash,
 	isDeclareStation,
@@ -183,6 +184,7 @@ import {
 } from "../src/mcp.ts";
 import { listSkills, saveSkill } from "../src/skills.ts";
 import { BACKUP_ROOT, buildBackupZip, projectSessionDir, stageRestore } from "../src/backup.ts";
+import { assetVault, isProtectedPath, KEEP_CHECKPOINTS } from "../src/asset-vault.ts";
 import { promoteStagedCard } from "../src/migrate-cards.ts";
 import { DEFAULT_CONFIG, type LorebookEntry, type RpConfig } from "../src/types.ts";
 import { readJsonFile } from "../src/jsonio.ts";
@@ -2108,7 +2110,33 @@ export function importEmbeddedLoreForCards(
 	return { results, newlyMounted, nextConfig };
 }
 
+/**
+ * 用户显式删掉一个素材文件（刀3）：落在受保护目录里的一律进回收站，不硬删。
+ * 卡工作空间（cards/<卡>/ 整棵）不在受保护清单里——那里有自己的「相关数据」语义，照旧。
+ */
+function deleteAssetOrFile(cwd: string, abs: string): void {
+	if (isProtectedPath(relative(cwd, abs))) {
+		assetVault(cwd).trashAsset(abs);
+		return;
+	}
+	unlinkSync(abs);
+}
+
 export async function handleApiRequest(req: IncomingMessage, res: ServerResponse, host: RestHost): Promise<boolean> {
+	const handled = await routeApiRequest(req, res, host);
+	// 经 API 的资产写/删之后补一次快照（刀3）：GET 不动盘，跳过。
+	// 什么都没变时只是一轮 stat，不落检查点——所以每条写请求都过一遍也便宜。
+	if (handled && req.method !== "GET" && req.method !== "HEAD") {
+		try {
+			assetVault(host.cwd).snapshot("api");
+		} catch (err) {
+			console.error(`[liyuan] 素材快照失败：${err instanceof Error ? err.message : String(err)}`); // i18n-ignore：服务端日志
+		}
+	}
+	return handled;
+}
+
+async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: RestHost): Promise<boolean> {
 	const url = (req.url ?? "/").split("?")[0];
 	if (!url.startsWith("/api/")) return false;
 	const query = new URLSearchParams((req.url ?? "").split("?")[1] ?? "");
@@ -3128,9 +3156,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				}
 
 				// 卡本体（JSON 卡的侧挂封面跟着卡走，留着就是孤儿裸图）
-				unlinkSync(abs);
+				deleteAssetOrFile(host.cwd, abs);
 				const sidecar = coverSidecarOf(abs);
-				if (sidecar !== abs && existsSync(sidecar)) unlinkSync(sidecar);
+				if (sidecar !== abs && existsSync(sidecar)) deleteAssetOrFile(host.cwd, sidecar);
 				cardMetaCache.delete(abs);
 				const favs = loadFavs(host.cwd);
 				if (favs.includes(p)) {
@@ -3148,7 +3176,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 						for (const f of readdirSync(dir)) {
 							if (!rx.test(f)) continue;
 							try {
-								unlinkSync(join(dir, f));
+								deleteAssetOrFile(host.cwd, join(dir, f));
 								gone.push(`${LOREBOOKS_DIR}/${f}`);
 							} catch {
 								// 删不掉的留着，挂载也别拆
@@ -3506,7 +3534,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const file = validatePresetPath(query.get("file") ?? "");
 				const abs = resolvePath(host.cwd, file);
 				if (!existsSync(abs)) throw new Error(t("预设文件不存在"));
-				unlinkSync(abs);
+				deleteAssetOrFile(host.cwd, abs); // 刀3：assets/presets/ 下的进回收站
 				const config = loadConfig(host.cwd) as unknown as Record<string, unknown>;
 				if (config.preset === file) {
 					clearPresetOverride(host.cwd);
@@ -3585,6 +3613,22 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				writeFileSync(abs, body.content, "utf8");
 				await host.softRefreshConfig();
 				sendJson(res, 200, { ok: true, path: abs, chars: body.content.length });
+				return true;
+			}
+			// ---- 命令黑名单（docs/PLAN-AGENT-BACK-TO-PI.md §二）：设置 → agent 行为 → 后端操控 下面 ----
+			case "GET /api/bash-denylist": {
+				const content = denylistContent();
+				sendJson(res, 200, { path: denylistPath(), content, rules: parseDenylist(content).map((r) => r.raw) });
+				return true;
+			}
+			case "PUT /api/bash-denylist": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { content?: string };
+				if (typeof body.content !== "string") throw new Error(t("缺少 content"));
+				const path = denylistPath();
+				mkdirSync(dirname(path), { recursive: true });
+				writeFileSync(path, body.content, "utf8");
+				sendJson(res, 200, { ok: true, path, rules: parseDenylist(body.content).map((r) => r.raw) });
 				return true;
 			}
 			// ---- 卡档案 AGENTS.md（刀3，docs/PLAN-AGENT-SLOTS.md §七）：文件为准 / 投影兜底 ----
@@ -3824,7 +3868,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				}
 				const abs = join(host.cwd, LOREBOOKS_DIR, base);
 				if (!existsSync(abs)) throw new Error(t("文件不存在"));
-				unlinkSync(abs);
+				const trashed = assetVault(host.cwd).trashAsset(abs); // 刀3：不硬删，进回收站
 				const config = loadConfig(host.cwd);
 				const active = mountedLorebookPaths(config);
 				const isTarget = (item: string) => {
@@ -3838,7 +3882,59 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				}
 				// 无论删除前是否挂载，删除后必须软刷新以对账 AGENTS.md 世界书镜像
 				await host.softRefreshConfig();
-				sendJson(res, 200, { ok: true });
+				host.notify("info", t("世界书已移入回收站（世界书面板可还原）：{name}", { name: base }));
+				sendJson(res, 200, { ok: true, trash: trashed });
+				return true;
+			}
+
+			// ---- 资料保护（刀3）：回收站与快照仓（docs/PLAN-AGENT-BACK-TO-PI.md §四） ----
+			case "GET /api/assets/trash": {
+				sendJson(res, 200, { items: assetVault(host.cwd).trashList() });
+				return true;
+			}
+			case "POST /api/assets/trash/restore": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { file?: string };
+				const file = (body.file ?? "").trim();
+				if (!file) throw new Error(t("缺少 file"));
+				const item = assetVault(host.cwd).trashRestore(file);
+				await host.softRefreshConfig(); // 素材回来了：挂载与装配要对一次账
+				host.notify("info", t("已从回收站还原：{path}", { path: item.from }));
+				sendJson(res, 200, { ok: true, item });
+				return true;
+			}
+			case "POST /api/assets/trash/purge": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { file?: string; all?: boolean };
+				const file = (body.file ?? "").trim();
+				if (!file && body.all !== true) throw new Error(t("要么给 file，要么显式 all=true——真删之后拿不回来"));
+				const purged = assetVault(host.cwd).trashPurge(file || undefined);
+				host.notify("info", t("已从回收站真删 {n} 个文件", { n: purged }));
+				sendJson(res, 200, { ok: true, purged });
+				return true;
+			}
+			/** 快照清单（最新的在前）：每条只回摘要，完整清单在盘上 检查点.jsonl */
+			case "GET /api/assets/vault": {
+				const checkpoints = assetVault(host.cwd).list().slice().reverse().map((c) => ({
+					id: c.id,
+					ts: c.ts,
+					reason: c.reason,
+					files: Object.keys(c.files).length,
+					changed: c.changed,
+				}));
+				sendJson(res, 200, { checkpoints, keep: KEEP_CHECKPOINTS });
+				return true;
+			}
+			/** 按快照把受保护素材写回（多出来的文件进回收站，不硬删） */
+			case "POST /api/assets/vault/restore": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { id?: string };
+				const id = (body.id ?? "").trim();
+				if (!id) throw new Error(t("缺少 id"));
+				const c = assetVault(host.cwd).restore(id);
+				await host.softRefreshConfig();
+				host.notify("info", t("已按快照写回素材（比快照多出来的文件进了回收站）"));
+				sendJson(res, 200, { ok: true, checkpointId: c?.id ?? null });
 				return true;
 			}
 

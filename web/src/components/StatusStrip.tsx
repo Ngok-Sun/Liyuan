@@ -91,14 +91,27 @@ const fmtK = (n: number) => {
 	return String(n);
 };
 
-/** 输入框下方：会话用量（无费用） */
-export function SessionStatsBar({ stats }: { stats: WireStats | null }) {
-	if (!stats) return null;
+/** 输入框下方：会话用量（无费用）＋压缩进行中（引擎 compaction 帧驱动，带计时） */
+export function SessionStatsBar({ stats, compacting }: { stats: WireStats | null; compacting?: { detail: string; since: number } | null }) {
+	const [, tick] = useState(0);
+	useEffect(() => {
+		if (!compacting) return;
+		const h = setInterval(() => tick((n) => n + 1), 1000);
+		return () => clearInterval(h);
+	}, [compacting?.since]);
+	const secs = compacting ? Math.max(0, Math.round((Date.now() - compacting.since) / 1000)) : 0;
+	const compactLine = compacting ? (
+		<span className="stats-compacting" title={compacting.detail}>
+			<span className="stats-compacting-dot" aria-hidden="true" />
+			{t("压缩中 {secs}s", { secs })}
+		</span>
+	) : null;
+	if (!stats) return compactLine ? <div className="session-stats-bar">{compactLine}</div> : null;
 	const msgs = stats.userMessages + stats.assistantMessages;
 	const win = stats.contextWindow && stats.contextWindow > 0 ? stats.contextWindow : null;
 	const used = typeof stats.contextTokens === "number" && stats.contextTokens >= 0 ? stats.contextTokens : null;
 	// 累计 = 本分支各轮 input+output+cache 相加（每轮都会重发 system，会比「上下文」大很多）
-	// 上下文 = 上一轮请求的 prompt 侧占用（不含生成输出）
+	// 上下文 = 上一轮请求的 prompt 侧占用（不含生成输出）；压缩刚发生的那一拍是引擎按压掉的份额折算的值
 	const ctxLabel =
 		stats.contextPercent !== null
 			? win
@@ -119,6 +132,7 @@ export function SessionStatsBar({ stats }: { stats: WireStats | null }) {
 	return (
 		<div className="session-stats-bar" title={title}>
 			{parts.join(" · ")}
+			{compactLine}
 		</div>
 	);
 }

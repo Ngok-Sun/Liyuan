@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { cardAuthoringDirectory } from "./card-authoring.ts";
 import { loadCardConfig, resolveCardSpace, saveCardConfig } from "./cardspace.ts";
+import { type DenylistRule, matchDenylist, normalizeCommand, readDenylistRules } from "./bash-denylist.ts";
 import type { ConversationEntry } from "./conversation-mode.ts";
 import { mountedLorebookPaths } from "./lorebook.ts";
 import { CARDS_ROOT, CHATS_DIR, CHAT_HISTORY_DIR, CHAT_SESSIONS_DIR, SHARED_LIBRARY_DIRS, cardsRoot, insidePath } from "./paths.ts";
@@ -46,15 +47,18 @@ export interface SandboxScope {
 	roots: string[];
 	/** 只读根（已取 realpath）：公共库、挂载的书文件 */
 	readRoots: string[];
+	/** 命令黑名单规则（`<agentDir>/BASH_DENYLIST.txt`，用户可见可改）；空表＝不拦 */
+	denyRules: DenylistRule[];
 }
 
 export interface SandboxGrants {
 	/** 已授权的目录或文件（绝对路径，已取 realpath） */
 	dirs: string[];
-	bash: boolean;
+	/** bash 免问前缀（归一化形态）：命令的每一段都要命中其一才不问；空表＝每条都问 */
+	bashAllow: string[];
 }
 
-export type SandboxGrant = { dir: string } | { bash: true };
+export type SandboxGrant = { dir: string } | { bashPrefix: string };
 
 export type SandboxVerdict =
 	| { kind: "allow" }
@@ -150,6 +154,7 @@ export function sandboxScope(
 		chatDir: chatDir ? realExisting(chatDir) : undefined,
 		roots: roots.map(realExisting),
 		readRoots: readRoots.map(realExisting),
+		denyRules: readDenylistRules(),
 	};
 }
 
@@ -184,10 +189,32 @@ export function harnessManagedPath(cardDir: string | undefined, target: string):
 	return segs[0] === CHATS_DIR && segs.length >= 3 && (segs[2] === CHAT_HISTORY_DIR || segs[2] === CHAT_SESSIONS_DIR);
 }
 
+/** 命令的免问前缀：默认取首词（`git status` 这种多词前缀由用户在 卡.json 里自己改窄） */
+export function commandPrefix(command: string): string {
+	const first = command.split(/[;&|\n\r]+/).map((s) => normalizeCommand(s)).find(Boolean) ?? "";
+	return first.split(" ")[0] ?? "";
+}
+
+/**
+ * 免问判定：命令按段切、逐段归一化，**每一段**都要命中某个前缀。
+ * 逐段（而不是整串前缀）是为了不让 `cd x && 任意命令` 被 `cd` 一把带走。
+ */
+export function allowedByPrefix(command: string, prefixes: string[]): boolean {
+	if (prefixes.length === 0) return false;
+	const segments = command.split(/[;&|\n\r]+/).map((s) => normalizeCommand(s)).filter(Boolean);
+	if (segments.length === 0) return false;
+	return segments.every((segment) => prefixes.some((p) => segment === p || segment.startsWith(`${p} `)));
+}
+
 export function sandboxVerdict(tool: string, input: Record<string, unknown>, scope: SandboxScope, grants: SandboxGrants): SandboxVerdict {
 	const access = NATIVE_TOOL_ACCESS[tool as NativeToolName];
 	if (!access) return { kind: "allow" };
-	if (access === "bash") return grants.bash ? { kind: "allow" } : { kind: "ask-bash", command: String(input.command ?? "") };
+	if (access === "bash") {
+		const command = String(input.command ?? "");
+		const hit = matchDenylist(command, scope.denyRules);
+		if (hit) return { kind: "deny", reason: `已拦截：命中命令黑名单「${hit.raw}」，梨园不允许执行。如确有需要，请向用户说明。` };
+		return allowedByPrefix(command, grants.bashAllow) ? { kind: "allow" } : { kind: "ask-bash", command };
+	}
 	const target = realExisting(sandboxTarget(tool, input, scope.cwd)!);
 	if (isOtherChatPath(scope.cardDir, scope.chatDir, target)) {
 		return { kind: "deny", reason: `${display(scope.cwd, target)} 属于其他独立项目，当前项目无权访问。` };
@@ -206,14 +233,13 @@ export function sandboxVerdict(tool: string, input: Record<string, unknown>, sco
 
 export function sandboxGrantsFromBranch(branch: ConversationEntry[]): SandboxGrants {
 	const dirs: string[] = [];
-	let bash = false;
 	for (const e of branch) {
 		if (e.type !== "custom" || e.customType !== SANDBOX_GRANT_TYPE) continue;
-		const d = e.data as { dir?: unknown; bash?: unknown } | undefined;
+		const d = e.data as { dir?: unknown } | undefined;
 		if (typeof d?.dir === "string") dirs.push(d.dir);
-		if (d?.bash === true) bash = true;
 	}
-	return { dirs, bash };
+	// 旧条目的 `{ bash: true }` 读时忽略（收缩，不迁移）：一个布尔＝整机永久放行，正是要撤掉的那档
+	return { dirs, bashAllow: [] };
 }
 
 /** 落盘形态：工程根内存相对路径（正斜杠，跨机可读），根外存绝对路径 */
@@ -223,14 +249,20 @@ function storedPath(cwd: string, abs: string): string {
 }
 
 export function permanentGrants(cwd: string, cardDir: string | undefined): SandboxGrants {
-	if (!cardDir) return { dirs: [], bash: false };
+	if (!cardDir) return { dirs: [], bashAllow: [] };
 	const c = loadCardConfig(cardDir);
-	return { dirs: (c.sandboxAllow ?? []).map((p) => realExisting(resolve(cwd, p))), bash: c.sandboxBash === true };
+	return {
+		dirs: (c.sandboxAllow ?? []).map((p) => realExisting(resolve(cwd, p))),
+		bashAllow: (c.sandboxBashAllow ?? []).map(normalizeCommand).filter(Boolean),
+	};
 }
 
 export function addPermanentGrant(cwd: string, cardDir: string, grant: SandboxGrant): void {
-	if ("bash" in grant) {
-		saveCardConfig(cardDir, { sandboxBash: true });
+	if ("bashPrefix" in grant) {
+		const prefix = normalizeCommand(grant.bashPrefix);
+		if (!prefix) return;
+		const list = loadCardConfig(cardDir).sandboxBashAllow ?? [];
+		if (!list.includes(prefix)) saveCardConfig(cardDir, { sandboxBashAllow: [...list, prefix] });
 		return;
 	}
 	const list = loadCardConfig(cardDir).sandboxAllow ?? [];
@@ -257,16 +289,16 @@ const display = (cwd: string, p: string): string => {
 export function describeAsk(v: Exclude<SandboxVerdict, { kind: "allow" } | { kind: "deny" }>, scope: SandboxScope): AskCard {
 	const always = scope.cardDir !== undefined;
 	if (v.kind === "ask-bash") {
+		const prefix = commandPrefix(v.command);
 		return {
 			question: `请求执行命令（bash 不受卡目录限制）：\n${v.command}`,
 			options: [
 				{ label: "允许一次", action: "once" },
-				{ label: "本会话允许 bash", action: "session" },
-				...(always ? [{ label: "永久允许 bash（本卡）", action: "always" as const }] : []),
+				...(always && prefix ? [{ label: `以后不再问「${prefix}」（本卡）`, action: "always" as const }] : []),
 				{ label: "拒绝", action: "deny" },
 			],
 			denied: "用户拒绝执行该命令。",
-			grant: { bash: true },
+			grant: { bashPrefix: prefix },
 		};
 	}
 	const root = realExisting(scope.cwd);
@@ -312,7 +344,7 @@ export function createSandboxGate(deps: SandboxGateDeps): (tool: string, input: 
 		scope ??= sandboxScope(deps.cwd, deps.config, deps.chatDir);
 		const session = deps.sessionGrants();
 		const perm = permanentGrants(deps.cwd, scope.cardDir);
-		const v = sandboxVerdict(tool, input, scope, { dirs: [...session.dirs, ...perm.dirs], bash: session.bash || perm.bash });
+		const v = sandboxVerdict(tool, input, scope, { dirs: [...session.dirs, ...perm.dirs], bashAllow: [...session.bashAllow, ...perm.bashAllow] });
 		if (v.kind === "allow") return undefined;
 		if (v.kind === "deny") { deps.log?.(`${tool} ${display(scope.cwd, sandboxTarget(tool, input, scope.cwd) ?? "")} → deny`); return v.reason; }
 		const card = describeAsk(v, scope);

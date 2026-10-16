@@ -16,6 +16,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative } from "node:path";
+import { createInterface } from "node:readline";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
 	createAgentSessionFromServices,
@@ -51,7 +52,7 @@ import { displayConversationBranch, storyBranch, messageMode, isConversationMode
 import { cardProjectOperation, previewCardProject } from "../src/card-authoring.ts";
 import { buildCardPreviewRequest, CardPreviewHub } from "./card-preview.ts";
 import { ScreenshotHub, type ScreenshotReport } from "./screenshot.ts";
-import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
+import { stateFromBranch, SUMMARY_ENTRY_TYPE, type BranchEntryLike } from "../src/stage/assemble.ts";
 import {
 	activePanels,
 	closePanel as closePanelInMap,
@@ -69,6 +70,7 @@ import {
 	resolveConfigPath,
 	takeAgentMergeLog,
 } from "../src/paths.ts";
+import { seedBashDenylist } from "../src/bash-denylist.ts";
 import { applyPatch, loadState, saveState } from "../src/state.ts";
 import { DEFAULT_CONFIG, type RpConfig, type WorldState } from "../src/types.ts";
 import {
@@ -146,6 +148,7 @@ import {
 	type WireCheckpoint,
 } from "./wire.ts";
 import { chapterTitle, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type Checkpoint } from "../src/stage/story-history.ts";
+import { DISCUSSION_SUMMARY_TYPE } from "../src/stage/discussion.ts";
 import { chatDirOf, chatSessionsDirOf, sameCardPath } from "../src/paths.ts";
 import { readSessionCardInfo } from "../src/session-scan.ts";
 import { t } from "../src/i18n/index.ts";
@@ -161,6 +164,7 @@ import {
 } from "../src/lorebook.ts";
 import { syncStoryPanelsFromDisk, syncStoryStateFromDisk } from "../src/story-sync.ts";
 import { applyPendingBackupRestore, BACKUP_ROOT, buildBackupZip, projectSessionDir } from "../src/backup.ts";
+import { assetVault, SNAPSHOT_INTERVAL_MS } from "../src/asset-vault.ts";
 import { fileChangeOf, toolStartDetail } from "../src/activity-format.ts";
 import {
 	checkLatestRelease,
@@ -184,10 +188,19 @@ const productRoot = process.env.LIYUAN_PRODUCT_ROOT ?? cwd;
 // 扮演骨架播种（刀1，docs/PLAN-AGENT-SLOTS.md §七）：首次启动把随包的
 // assets/SYSTEM.md 落到 <agentDir>/SYSTEM.md；已存在不覆盖——改了就是用户的。
 seedStageSystemPrompt(cwd, agentHome);
+seedBashDenylist(agentHome);
 seedBuiltinSkills(cwd);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const PORT = Number(process.env.PORT ?? 7620);
 const newSessionFlag = process.argv.includes("--new");
+/**
+ * CLI 模式（`--cli`）：终端前端，与 Web 共用同一份台上引擎（2026-10-15 用户定调）。
+ * 台上逻辑本来就不绑前端——StageEngine 必填只有 cwd/getSession/getModel/getAuth/sideStreamFn，
+ * 其余 dep 缺了就降级（依赖缺失的工具不上清单）。所以这里不新增架构，只接两头：
+ * 「一行输入 → 一拍」与「帧 → 屏幕」。会话、卡、子项目与 Web 完全同源（启动时仍是
+ * storySessionTarget 选出的那个子项目），HTTP/WS 一律不启。
+ */
+const cliMode = process.argv.includes("--cli");
 
 // 数据目录/配置文件：.rp-* → .liyuan-*，rp.config.json → liyuan.config.json
 for (const line of migrateLegacyLayout(cwd)) {
@@ -375,6 +388,21 @@ const wsPingTimer = setInterval(() => {
 		sock.ping();
 	}
 }, 20_000);
+
+/**
+ * 资料保护快照（刀3，docs/PLAN-AGENT-BACK-TO-PI.md §四）的定时兜底。
+ * 没有 OS 隔离时，这是唯一能覆盖「agent 用 bash 直写素材目录」那条路径的机制；
+ * 经 API 的写/删另有 server/rest.ts 每请求的补快照。unref：别拖住进程退出。
+ */
+const assetSnapshotTimer = setInterval(() => {
+	try {
+		const c = assetVault(cwd).snapshot("timer");
+		if (c) console.log(`[liyuan] 素材快照：${Object.keys(c.files).length} 个文件有记录`); // i18n-ignore：终端日志
+	} catch (err) {
+		console.error(`[liyuan] 素材快照失败：${err instanceof Error ? err.message : String(err)}`); // i18n-ignore：终端日志
+	}
+}, SNAPSHOT_INTERVAL_MS);
+assetSnapshotTimer.unref();
 wsPingTimer.unref();
 const broadcast = (frame: ServerFrame) => {
 	const data = JSON.stringify(frame);
@@ -514,7 +542,9 @@ setTimeout(() => void runUpdateCheck(false).catch(() => {}), 3000);
 const safeStats = (): WireStats | null => {
 	try {
 		const s = session.getSessionStats();
-		const cu = s.contextUsage;
+		// 引擎自算优先：压缩刚发生、下一拍真实 usage 还没落地时，pi 的数还停在压缩前
+		// （压缩条目是 custom entry，不进 pi 的消息列表）。其余时刻仍用 pi 的实测值。
+		const cu = stage?.contextUsage?.() ?? s.contextUsage;
 		return {
 			userMessages: s.userMessages,
 			assistantMessages: s.assistantMessages,
@@ -843,6 +873,27 @@ const branchMessages = (): unknown[] => {
 			const cp = e.data as Omit<Checkpoint, "files"> | undefined;
 			if (!cp?.id || !cp.changed) continue;
 			out.push({ role: "custom", customType: STORY_CHECKPOINT_TYPE, display: true, content: cp.message, details: { checkpoint: toWireCheckpoint(cp) } });
+		} else if (e.type === "custom" && (e.customType === SUMMARY_ENTRY_TYPE || e.customType === DISCUSSION_SUMMARY_TYPE)) {
+			// 压缩记录卡片：摘要原本只在树上（custom entry），界面看不见——用户报「压完那份摘要我看不见」。
+			// 只投影有正文的条目；覆盖了什么、压了多少都随卡片带出去（数据在条目上，前端不猜）。
+			const d = e.data as { summary?: unknown; turns?: unknown; chars?: unknown; coveredFiles?: unknown } | undefined;
+			if (typeof d?.summary !== "string" || !d.summary.trim()) continue;
+			out.push({
+				role: "custom",
+				customType: e.customType,
+				display: true,
+				content: "",
+				details: {
+					rpCompaction: {
+						kind: e.customType === DISCUSSION_SUMMARY_TYPE ? "discussion" : "story",
+						// 老条目没记 turns/chars（2026-10-16 前落的摘要）——不拿 0 冒充，缺就不给
+						...(typeof d.turns === "number" ? { turns: d.turns } : {}),
+						...(typeof d.chars === "number" ? { chars: d.chars } : {}),
+						...(Array.isArray(d.coveredFiles) ? { covered: d.coveredFiles.length } : {}),
+						summary: d.summary,
+					},
+				},
+			});
 		}
 	}
 	return out;
@@ -1193,6 +1244,106 @@ const askChoice = (question: string, options: string[], placeholder: string | un
 		signal?.addEventListener("abort", () => settleChoice(id, { stop: true }), { once: true });
 	});
 
+/**
+ * 终端前端（`--cli`）。与 Web 同一份引擎，这里只负责「线」与「屏」：
+ * - 一条读线：主循环与选择卡共用一个队列（两者在时间上互斥，不会抢）
+ * - 一种流式：正文原样打，思考/活动/回执加 `[前缀]`，回看时可以整类过滤
+ * 选择卡走同一条读线——沙箱申请（卡外访问）、ask 工具都经它；不作答＝停止，
+ * 与前端「点了停止」同义（`askChoice` 的 signal 中止在这里同样收敛成 stop）。
+ */
+function createCliFrontend() {
+	const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true });
+	const queued: string[] = [];
+	let waiter: ((v: string | null) => void) | null = null;
+	let closed = false;
+	rl.on("line", (l) => {
+		const w = waiter;
+		if (w) {
+			waiter = null;
+			w(l);
+		} else queued.push(l);
+	});
+	rl.on("close", () => {
+		closed = true;
+		const w = waiter;
+		if (w) {
+			waiter = null;
+			w(null);
+		}
+	});
+
+	/** 下一行输入；EOF 给 null */
+	const readLine = (): Promise<string | null> => {
+		const next = queued.shift();
+		if (next !== undefined) return Promise.resolve(next);
+		if (closed) return Promise.resolve(null);
+		return new Promise((res) => {
+			waiter = res;
+		});
+	};
+
+	// 半成品行：流式打到一半时别让别的输出插进同一行
+	let open = false;
+	let openKind: string | null = null;
+	const closeLine = () => {
+		if (!open) return;
+		process.stdout.write("\n");
+		open = false;
+		openKind = null;
+	};
+	const out = (s: string) => {
+		closeLine();
+		process.stdout.write(`${s}\n`);
+	};
+
+	return {
+		readLine,
+		out,
+		/** 流式一段；kind 变了就先断行重开一个带前缀的行（非正文通道逐行都带前缀，回看时整类可滤） */
+		stream(kind: string, d: string) {
+			if (!d) return;
+			const prefix = kind === "text" ? "" : `[${label(kind)}] `;
+			if (!open || openKind !== kind) {
+				closeLine();
+				if (prefix) process.stdout.write(prefix);
+				open = true;
+				openKind = kind;
+			}
+			process.stdout.write(prefix ? d.replace(/\n/g, `\n${prefix}`) : d);
+		},
+		/** 选择卡：选项编号打出来，读一行作答（编号 / 0=停止 / 其余当自由输入） */
+		async ask(question: string, options: string[], signal?: AbortSignal): Promise<string | undefined> {
+			closeLine();
+			process.stdout.write(`\n${question}\n`);
+			options.forEach((o, i) => process.stdout.write(`  ${i + 1}. ${o}\n`));
+			process.stdout.write("  0. 停止\n"); // i18n-ignore：终端日志
+			const aborted = new Promise<null>((res) => signal?.addEventListener("abort", () => res(null), { once: true }));
+			const line = (await Promise.race([readLine(), aborted]))?.trim();
+			if (!line || line === "0" || /^(stop|停止)$/i.test(line)) {
+				out("[选择] 停止"); // i18n-ignore：终端日志
+				return undefined;
+			}
+			const n = Number.parseInt(line, 10);
+			if (Number.isFinite(n) && n >= 1 && n <= options.length) {
+				const picked = options[n - 1]!;
+				out(`[选择] ${picked}`); // i18n-ignore：终端日志
+				return picked;
+			}
+			out(`[选择] ${line}`); // i18n-ignore：终端日志
+			return line;
+		},
+	};
+}
+
+/** 流式前缀（终端日志，不进 i18n 扫描面） */
+function label(kind: string): string {
+	if (kind === "thinking") return "思考"; // i18n-ignore：终端日志
+	if (kind === "text") return "";
+	return kind;
+}
+
+const cli = cliMode ? createCliFrontend() : undefined;
+
 const uiContext = {
 	// 有实义的部分：通知直达 Web（审计告警零改动上屏）
 	notify(message: string, type?: "info" | "warning" | "error") {
@@ -1500,20 +1651,24 @@ const bindSession = async () => {
 				// RP 人话摘要（非 JSON）；模型台侧旁白另由 stream→note 捕获
 				const detail = toolStartDetail(event.toolName, event.args);
 				const change = fileChangeOf(event.toolName, event.args);
+				cli?.out(`[tool] ${event.toolName} ${JSON.stringify(event.args)}`);
 				broadcast({ type: "activity", activity: { kind: "tool_start", name: event.toolName, detail, ...(change ? { change } : {}) } });
 				break;
 			}
-			case "tool_execution_end":
+			case "tool_execution_end": {
+				const summary = summarizeToolResult(event.result);
+				cli?.out(`[result] ${event.isError ? "✗ " : ""}${event.toolName} ${summary.slice(0, 300)}`);
 				broadcast({
 					type: "activity",
 					activity: {
 						kind: "tool_end",
 						name: event.toolName,
-						detail: summarizeToolResult(event.result),
+						detail: summary,
 						isError: event.isError === true,
 					},
 				});
 				break;
+			}
 			case "compaction_start":
 				broadcast({ type: "compaction", state: "start" });
 				break;
@@ -2646,7 +2801,8 @@ stage = new StageEngine({
 	},
 	// P7 剧情决策门禁（ask 工具）：复用 Phase 4 柱 1 的选择卡通道——
 	// 弹卡 → 用户作答（选项原文/自由输入）回喂模型重拟计划；停止 → 本拍收束，笔还给用户。
-	askUser: (question, options, signal) => askChoice(question, options, undefined, signal),
+	askUser: (question, options, signal) =>
+		cli ? cli.ask(question, options, signal) : askChoice(question, options, undefined, signal),
 	// 截图（agent 模式）：请连接中的页面截当前稿子画面。无页面或超时返回 null。
 	screenshot: async (file, signal) => {
 		const report = await screenshots.run({ id: screenshots.nextId(), ...(file ? { file } : {}) });
@@ -2763,16 +2919,27 @@ stage = new StageEngine({
 	sideStreamFn: (model, context, options) => session.modelRuntime.streamSimple(model as never, context as never, options as never) as unknown as ReturnType<StageStreamFn>,
 	events: {
 		onModeChanged: (mode) => { broadcast({ type: "conversation_mode", mode, turnMode: stage.turnMode }); resyncAll(); },
-		onTurnStart: () => broadcast({ type: "agent", state: "start" }),
-		onDelta: (kind, delta, draft, reset) =>
-			broadcast({ type: "delta", kind, delta, ...(draft ? { draft: true } : {}), ...(reset ? { reset: true } : {}) }),
+		onTurnStart: () => { cli?.out(""); broadcast({ type: "agent", state: "start" }); },
+		onDelta: (kind, delta, draft, reset) => {
+			if (!draft) cli?.stream(kind, delta);
+			broadcast({ type: "delta", kind, delta, ...(draft ? { draft: true } : {}), ...(reset ? { reset: true } : {}) });
+		},
 		onDraftResync: (segments) => broadcast({ type: "draft_resync", segments }),
 		onWorkspace: (workspace) => broadcast({ type: "draft_workspace", workspace: workspaceView(workspace), streaming: stage.isStreaming }),
 		onReplyRevised: () => resyncAll(),
 		onStreamClear: () => broadcast({ type: "stream", state: "clear" }),
-		onNotify: (level, text) => broadcast({ type: "notify", level, text }),
-		onActivity: (detail) => broadcast({ type: "activity", activity: { kind: "note", name: "stage", detail } }),
+		onNotify: (level, text) => { cli?.out(`[${level}] ${text}`); broadcast({ type: "notify", level, text }); },
+		onActivity: (detail) => {
+			cli?.out(`[activity] ${detail}`);
+			broadcast({ type: "activity", activity: { kind: "note", name: "stage", detail } });
+		},
+		/** 压缩起止（自动与手动同一条）：前端据此显示常驻「压缩中」条与完成提示，不解析 activity 字符串 */
+		onCompaction: (e) => {
+			cli?.out(`[compaction] ${e.detail}`);
+			broadcast({ type: "compaction", state: e.state, kind: e.kind, detail: e.detail, ...(e.ok !== undefined ? { ok: e.ok } : {}) });
+		},
 		onTurnEnd: (info) => {
+			cli?.out(`[end] mode=${info.mode ?? "?"}${info.aborted ? " aborted" : ""}${info.error ? ` error=${info.error}` : ""}`);
 			broadcast({ type: "agent", state: "end" });
 			// reroll/编辑输入后无产出（aborted 无落树 / error）：回退到 reroll 前的旧叶——
 			// 不许留下「只有 user 没有回复」的空拍（8/05：reroll 链上停止，前版本全消失）。
@@ -2860,19 +3027,13 @@ const storyStreaming = (): boolean => session.isStreaming || stage.isStreaming;
 
 /**
  * 手动压缩（/compact 与 WS compact 帧共用）：走台上引擎自管压缩（M4）。
- * 摘要落 rp-summary 后 resyncAll——重放时被覆盖的楼层照旧全在（树只追加），
- * 变的只是**送模上下文**：装配时那段改由【前情提要】代替。
+ * 摘要落树后 resyncAll——重放时被覆盖的楼层照旧全在（树只追加），
+ * 变的只是**送模上下文**：装配时那段改由【前情提要】/【讨论摘要】代替。
+ * 起止与完成文案由引擎的 onCompaction 事件带（自动压缩同一条），这里只管没压成的那几种收场。
  */
 const hostCompact = async (): Promise<void> => {
-	broadcast({ type: "compaction", state: "start" });
 	const r = await stage.compactNow();
-	broadcast({ type: "compaction", state: "end", ok: r.kind === "compacted" });
 	if (r.kind === "compacted") {
-		broadcast({
-			type: "notify",
-			level: "info",
-			text: t("前情已压缩：{turns} 拍 {chars} 字 → 摘要 {summary} 字", { turns: r.turns, chars: r.chars, summary: r.summary.length }),
-		});
 		resyncAll();
 	} else if (r.kind === "failed") {
 		broadcast({ type: "notify", level: "error", text: t("压缩失败：{error}", { error: r.error }) });
@@ -2882,7 +3043,12 @@ const hostCompact = async (): Promise<void> => {
 		broadcast({
 			type: "notify",
 			level: "info",
-			text: r.reason === "busy" ? t("正在演出中，稍后再压缩") : t("早期剧情还不够长，暂不需要压缩"),
+			text:
+				r.reason === "busy"
+					? t("正在演出中，稍后再压缩")
+					: r.reason === "nothing-to-compact"
+						? t("还没有可压缩的内容")
+						: t("早期剧情还不够长，暂不需要压缩"),
 		});
 	}
 };
@@ -3655,32 +3821,51 @@ wss.on("connection", (ws, req) => {
 
 // ---------- 启动 ----------
 
-httpServer.listen(PORT, HOST, () => {
-	const urls = [`http://localhost:${PORT}`];
-	if (HOST === "0.0.0.0") {
-		for (const list of Object.values(networkInterfaces())) {
-			for (const ni of list ?? []) {
-				if (ni.family === "IPv4" && !ni.internal) urls.push(`http://${ni.address}:${PORT}`);
-			}
-		}
+/** 两条入口（HTTP / CLI）共用的启动尾巴：素材快照 + 装配对账 */
+function bootSideEffects(): void {
+	// 刀3：起一次素材快照（首启要全量哈希一遍，之后按 mtime/size 增量）
+	try {
+		const snap = assetVault(cwd).snapshot("startup");
+		if (snap) console.log(`[liyuan] 素材快照：${Object.keys(snap.files).length} 个文件`); // i18n-ignore：终端日志
+	} catch (err) {
+		console.error(`[liyuan] 素材快照失败：${err instanceof Error ? err.message : String(err)}`); // i18n-ignore：终端日志
 	}
-	console.log(`[liyuan] ${names.charName} 已就位（会话 ${session.sessionId.slice(0, 8)}…）`); // i18n-ignore：终端日志
-	console.log(`[liyuan] agent 目录 ${agentHome}`); // i18n-ignore：终端日志
-	for (const line of takeAgentMergeLog()) {
-		console.log(`[liyuan] 迁移 ${line}`); // i18n-ignore：终端日志
-	}
-	console.log(`[liyuan] ${urls.join("  |  ")}（手机连同一 Wi-Fi 访问后者；勿暴露公网）`); // i18n-ignore：终端日志
 	// 启动时对一次账：装载中的预设与挂载书的镜像（升级前的状态也算）落进卡文件，再刷一次装配
 	void restHost.softRefreshConfig().catch(() => {});
-});
+}
+
+if (cli) {
+	void runCliLoop();
+} else {
+	httpServer.listen(PORT, HOST, () => {
+		const urls = [`http://localhost:${PORT}`];
+		if (HOST === "0.0.0.0") {
+			for (const list of Object.values(networkInterfaces())) {
+				for (const ni of list ?? []) {
+					if (ni.family === "IPv4" && !ni.internal) urls.push(`http://${ni.address}:${PORT}`);
+				}
+			}
+		}
+		console.log(`[liyuan] ${names.charName} 已就位（会话 ${session.sessionId.slice(0, 8)}…）`); // i18n-ignore：终端日志
+		console.log(`[liyuan] agent 目录 ${agentHome}`); // i18n-ignore：终端日志
+		for (const line of takeAgentMergeLog()) {
+			console.log(`[liyuan] 迁移 ${line}`); // i18n-ignore：终端日志
+		}
+		console.log(`[liyuan] ${urls.join("  |  ")}（手机连同一 Wi-Fi 访问后者；勿暴露公网）`); // i18n-ignore：终端日志
+		bootSideEffects();
+	});
+}
 
 const shutdown = async () => {
 	try {
 		unsubscribe?.();
 		clearInterval(wsPingTimer);
-		for (const ws of clients) ws.close();
-		wss.close();
-		httpServer.close();
+		clearInterval(assetSnapshotTimer);
+		if (!cli) {
+			for (const ws of clients) ws.close();
+			wss.close();
+			httpServer.close();
+		}
 		await runtime.dispose();
 	} finally {
 		process.exit(0);
@@ -3688,5 +3873,38 @@ const shutdown = async () => {
 };
 process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());
+
+/**
+ * CLI 主循环（`--cli`）：一行输入 → 一拍，打完再读下一行；EOF 退出。
+ * 分派与 Web 侧 handlePrompt 的收尾同一套判据：注册过的斜杠命令走 pi 命令通道，
+ * 其余一律经台上装配——绝不落进「无台上装配的裸 pi 回合」。
+ */
+async function runCliLoop(): Promise<void> {
+	console.log(`[liyuan] CLI：${names.charName}｜模式 ${stage.mode}｜卡 ${loadConfig(cwd).card}`); // i18n-ignore：终端日志
+	console.log("[liyuan] 发一段话即开演；/exit 退出；Ctrl+C 停本拍"); // i18n-ignore：终端日志
+	for (const line of takeAgentMergeLog()) {
+		console.log(`[liyuan] 迁移 ${line}`); // i18n-ignore：终端日志
+	}
+	// Ctrl+C 在 CLI 下先当「停本拍」，不直接杀进程（停了再按一次才退）
+	process.removeAllListeners("SIGINT");
+	process.on("SIGINT", () => {
+		if (stage.isStreaming) {
+			console.log("[liyuan] 已请求停止本拍"); // i18n-ignore：终端日志
+			stage.abort();
+			return;
+		}
+		void shutdown();
+	});
+	bootSideEffects();
+	for (;;) {
+		const raw = await cli!.readLine();
+		if (raw === null) break;
+		const trimmed = raw.trim();
+		if (!trimmed) continue;
+		if (trimmed === "/exit" || trimmed === "/quit") break;
+		await handlePrompt(trimmed);
+	}
+	await shutdown();
+}
 import { applyDraftRevisions } from "../src/stage/draft-projection.ts";
 import type { TurnWorkspace } from "../src/stage/workspace.ts";

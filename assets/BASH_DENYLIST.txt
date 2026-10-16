@@ -1,0 +1,52 @@
+# 梨园 命令黑名单
+#
+# 命中即拒绝执行，agent 拿不到任何执行结果。这里只放不可逆的灾难，正常操作不该出现。
+# 设置 → agent 行为 →「后端操控」下面可以查看和编辑这份文件。
+#
+# 写法同 Claude Code 的 Bash(...) 规则：
+#   - 一行一条，字面文本 + * 通配（* 可放任意位置）；没有 * 就是精确匹配
+#   - 按词边界匹配，所以 `rm -rf /` 不会误伤 `rm -rf /var/log`
+#   - 匹配前统一归一化：剥引号、\/ 还原成 /、折叠空白、转小写、短选项排序
+#     （故 -rf / -fr / -r -f / -f -r 四种写法等价，rm -rf "/" 也拦得住）
+#
+# 删掉任何一条即失去那条保护；在下面按同样写法加自己的。
+# 这份名单防手滑，不防蓄意绕过（r\m -rf /、$(echo rm) -rf / 这类必然漏）。
+
+# ── 删根与系统目录（递归删除不可逆）────────────────────────────
+rm -rf /
+rm -rf /etc
+rm -rf /usr
+rm -rf /bin
+rm -rf /sbin
+rm -rf /lib
+rm -rf /lib64
+rm -rf /boot
+rm -rf /dev
+rm -rf /proc
+rm -rf /sys
+rm -rf /root
+rm*--no-preserve-root*
+
+# ── 格式化与向块设备裸写 ───────────────────────────────────────
+# mkfs 后面必然跟设备路径，写成「mkfs…/dev/…」才不会误伤 which mkfs / man mkfs 这类提及
+mkfs*/dev/*
+dd*of=/dev/*
+
+# ── fork 炸弹 ──────────────────────────────────────────────────
+:|:&
+
+# ── Windows：递归删盘根或系统目录 ──────────────────────────────
+Remove-Item -Recurse -Force C:\
+Remove-Item -Recurse -Force C:\Windows
+rd /s /q C:\
+rd /s /q C:\Windows
+
+# ── Windows：格式化 / 抹盘 / 毁引导 / 删卷影副本 ───────────────
+format C:
+Format-Volume
+Clear-Disk
+diskpart clean
+diskpart /s
+reg delete HKLM
+bcdedit /delete
+vssadmin delete shadows

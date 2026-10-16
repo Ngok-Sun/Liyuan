@@ -279,6 +279,24 @@ test("custom 通道分发：greeting / import / display:false 跳过 / 其他走
 	assert.equal(toWireMsg({ role: "custom", customType: "whatever", content: "横幅" }, names)?.channel, "info");
 });
 
+test("压缩记录卡片：两种摘要条目 → compaction 通道，带摘要全文与覆盖量；无投影跳过", () => {
+	const disc = toWireMsg(
+		{ role: "custom", customType: "liyuan-discussion-summary", display: true, content: "", details: { rpCompaction: { kind: "discussion", turns: 3, chars: 12000, summary: "## 摘要\n- 写了三章" } } },
+		names,
+	);
+	assert.equal(disc?.channel, "compaction");
+	assert.equal(disc?.compaction?.kind, "discussion");
+	assert.equal(disc?.compaction?.turns, 3);
+	assert.match(disc?.compaction?.summary ?? "", /写了三章/);
+	const story = toWireMsg(
+		{ role: "custom", customType: "rp-summary", display: true, content: "", details: { rpCompaction: { kind: "story", turns: 2, chars: 3000, covered: 44, summary: "前情提要" } } },
+		names,
+	);
+	assert.equal(story?.channel, "compaction");
+	assert.equal(story?.compaction?.covered, 44, "正文侧带累计覆盖文件数");
+	assert.equal(toWireMsg({ role: "custom", customType: "rp-summary", content: "旧格式无投影" }, names), null, "没有投影的条目不上屏");
+});
+
 test("开场白/导入也走 prepareDisplayText：未知标签 unwrap，围栏留给前端 markdown", () => {
 	const raw = `洛清霜说完。\n\n<Options>\n\`\`\`\n选择1: 【留下】\n选择2: 【下山】\n\`\`\`\n</Options>`;
 	const g = toWireMsg({ role: "custom", customType: "rp-greeting", content: raw }, names);

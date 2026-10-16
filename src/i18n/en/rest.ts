@@ -203,6 +203,12 @@ export const rest: Record<string, string> = {
 	"已在本机备份 {n} 个文件（{size}）": "Backed up {n} file locally ({size})|Backed up {n} files locally ({size})",
 	"备份文件为空": "The backup file is empty",
 	"恢复点已就绪（{n} 个文件），正在重启应用以完成导入…": "Restore point ready ({n} files); restarting the app to finish the import…",
+	"世界书已移入回收站（世界书面板可还原）：{name}": "Lorebook moved to the recycle bin (restorable from the lorebook panel): {name}",
+	"缺少 file": "Missing file",
+	"已从回收站还原：{path}": "Restored from the recycle bin: {path}",
+	"要么给 file，要么显式 all=true——真删之后拿不回来": "Give either file or an explicit all=true — a purge cannot be undone",
+	"已从回收站真删 {n} 个文件": "Permanently deleted {n} file from the recycle bin|Permanently deleted {n} files from the recycle bin",
+	"已按快照写回素材（比快照多出来的文件进了回收站）": "Assets written back from the snapshot (files not in it went to the recycle bin)",
 	"聊天记录内容为空": "The chat log is empty",
 	"未知接口：{route}": "Unknown endpoint: {route}",
 };

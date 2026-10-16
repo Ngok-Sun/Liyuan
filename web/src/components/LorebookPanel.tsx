@@ -610,6 +610,165 @@ function BooksSection({
 	);
 }
 
+interface TrashItemView {
+	file: string;
+	from: string;
+	name: string;
+	ts: number;
+	size: number;
+	/** 文件本体还在不在回收站里 */
+	present: boolean;
+}
+
+interface VaultCheckpointView {
+	id: string;
+	ts: number;
+	reason: string;
+	files: number;
+	changed: { added: string[]; modified: string[]; renamed: Array<[string, string]>; removed: string[] };
+}
+
+const REASON_LABEL: Record<string, string> = {
+	startup: "启动", // i18n-ignore：用时 t()
+	timer: "定时", // i18n-ignore：用时 t()
+	api: "改动后", // i18n-ignore：用时 t()
+};
+
+function fmtWhen(ms: number): string {
+	const d = new Date(ms);
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function fmtBytes(n: number): string {
+	if (n < 1024) return `${n} B`;
+	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+	return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * 资料保护（刀3，docs/PLAN-AGENT-BACK-TO-PI.md §四）：
+ * 删掉的世界书 / 预设 / 卡先进回收站（可还原）——回收站是「真删」的唯一入口；
+ * 深一层是快照仓：每 10 分钟、每次经 API 改动素材之后各记一条，出事可按某一条整体写回。
+ */
+function ProtectSection({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
+	const trash = usePanelData(() => apiGet<{ items: TrashItemView[] }>("/api/assets/trash"), { cacheKey: "/api/assets/trash" });
+	const vault = usePanelData(() => apiGet<{ checkpoints: VaultCheckpointView[]; keep: number }>("/api/assets/vault"), {
+		cacheKey: "/api/assets/vault",
+	});
+	const { busy, run } = useAction(toast);
+	const [snaps, setSnaps] = useState(false);
+	const items = trash.data?.items ?? [];
+	const checkpoints = vault.data?.checkpoints ?? [];
+
+	/** 还原 / 写回都会改盘上素材：书单等 watch 面板一并重拉 */
+	const refreshAll = () => {
+		trash.reload();
+		vault.reload();
+		bumpWatchPanels();
+	};
+
+	const restore = (file: string) =>
+		run(async () => {
+			await apiPost("/api/assets/trash/restore", { file });
+			refreshAll();
+		}, t("已还原"));
+
+	const purge = (file: string) =>
+		run(async () => {
+			await apiPost("/api/assets/trash/purge", { file });
+			trash.reload();
+		}, t("已真删"));
+
+	const purgeAll = () =>
+		run(async () => {
+			await apiPost("/api/assets/trash/purge", { all: true });
+			trash.reload();
+		}, t("回收站已清空"));
+
+	const rollback = (id: string) =>
+		run(async () => {
+			await apiPost("/api/assets/vault/restore", { id });
+			refreshAll();
+		}, t("已按快照写回"));
+
+	const changeText = (c: VaultCheckpointView["changed"]) =>
+		[
+			c.added.length ? t("新增 {n}", { n: c.added.length }) : "",
+			c.modified.length ? t("修改 {n}", { n: c.modified.length }) : "",
+			c.renamed.length ? t("改名 {n}", { n: c.renamed.length }) : "",
+			c.removed.length ? t("删除 {n}", { n: c.removed.length }) : "",
+		]
+			.filter(Boolean)
+			.join(" · ") || t("无改动");
+
+	return (
+		<section className="sp-section">
+			<h4>
+				{t("回收站")}
+				<span className="lore-meta" style={{ marginLeft: 8, fontWeight: 400 }}>{t("{n} 个文件", { n: items.length })}</span>
+			</h4>
+			<div className="field-hint">{t("删掉的世界书 / 预设 / 卡先移到这里（项目里 assets/.回收站/），可以还原；「清空」才是真删。")}</div>
+			<PanelStatus loading={trash.loading} error={trash.error} hasData={!!trash.data} />
+			{trash.data && items.length === 0 && <div className="sp-empty">{t("回收站是空的。")}</div>}
+			{items.map((it) => (
+				<div key={it.file} className="book-item-wrap">
+					<div className="book-row">
+						<span className="book-name">{it.name}</span>
+						<button type="button" className="act" disabled={busy || !it.present} onClick={() => restore(it.file)}>
+							{t("还原")}
+						</button>
+						<ConfirmButton disabled={busy} confirmText={t("确认真删")} onConfirm={() => purge(it.file)}>
+							{t("真删")}
+						</ConfirmButton>
+					</div>
+					<div className="lore-keys">
+						{fmtWhen(it.ts)} · {fmtBytes(it.size)} · {it.from}
+					</div>
+				</div>
+			))}
+			{items.length > 0 && (
+				<div className="panel-row">
+					<ConfirmButton disabled={busy} confirmText={t("确认清空")} onConfirm={purgeAll}>
+						{t("清空回收站")}
+					</ConfirmButton>
+				</div>
+			)}
+			<div className="panel-row">
+				<button type="button" className="drawer-btn" onClick={() => setSnaps((v) => !v)}>
+					{snaps ? t("收起资料快照") : t("资料快照（可写回）")}
+				</button>
+			</div>
+			{snaps && (
+				<>
+					<div className="field-hint">
+						{t("每 10 分钟、以及每次改动素材之后各记一条（保留最近 {n} 条）。出事了挑一条整体写回——比该条多出来的文件进回收站，不硬删。", { n: vault.data?.keep ?? 50 })}
+					</div>
+					<PanelStatus loading={vault.loading} error={vault.error} hasData={!!vault.data} />
+					{vault.data && checkpoints.length === 0 && <div className="sp-empty">{t("还没有快照。")}</div>}
+					{checkpoints.map((c) => (
+						<div key={c.id} className="book-item-wrap">
+							<div className="book-row">
+								<span className="book-name">{fmtWhen(c.ts)}</span>
+								<ConfirmButton disabled={busy} confirmText={t("确认写回")} onConfirm={() => rollback(c.id)}>
+									{t("写回")}
+								</ConfirmButton>
+							</div>
+							<div className="lore-keys">
+								{c.reason.startsWith("restore:") ? t("写回之后") : REASON_LABEL[c.reason] ? t(REASON_LABEL[c.reason]) : c.reason}
+								{" · "}
+								{t("{n} 个文件", { n: c.files })}
+								{" · "}
+								{changeText(c.changed)}
+							</div>
+						</div>
+					))}
+				</>
+			)}
+		</section>
+	);
+}
+
 export function LorebookPanel({ toast, onOpenDetail }: { toast: (level: "info" | "warning" | "error", text: string) => void; onOpenDetail?: (entry: LoreEntryView, scopePath: string) => void }) {
 	const [view, setView] = useState<ViewTarget | null>(null);
 	const viewKey = view?.kind === "file" ? `file:${view.path}` : view?.kind === "agent" ? "agent" : "none";
@@ -900,6 +1059,7 @@ export function LorebookPanel({ toast, onOpenDetail }: { toast: (level: "info" |
 					</section>
 				</>
 			)}
+			<ProtectSection toast={toast} />
 		</div>
 	);
 }

@@ -65,6 +65,33 @@ test("讨论压缩：估算不超窗口不压；超了从末尾按整轮保留�
 	assert.equal(serializeDiscussion([]), "");
 });
 
+test("讨论压缩：触发基准是真实 usage——估算看着不大、真实占用已超阈值也要压", () => {
+	const small = [...turn(1, "一", "x".repeat(10), "ok"), ...turn(2, "二", "y".repeat(10), "ok"), ...turn(3, "三", "z".repeat(10), "ok")];
+	assert.equal(planDiscussionCompaction(small, { contextWindow: 128000 }), null, "无 usage 时退估算：远小于窗口不压");
+	// 给最近一条过程记录 assistant 记上真实 usage（引擎落树的过程记录带 usage，实测 304/321 条非零）
+	const withUsage = small.map((e) =>
+		e.id === "p3f" ? { ...e, data: { ...(e.data as object), message: { ...((e.data as { message: object }).message), usage: { input: 120000, output: 10, cacheRead: 0, cacheWrite: 0 } } } } : e,
+	) as BranchEntryLike[];
+	const plan = planDiscussionCompaction(withUsage, { contextWindow: 128000 });
+	assert.ok(plan, "真实 12 万 > 128k−16k 应压");
+	assert.equal(plan.tokensBefore, 120000, "基准取真实 usage，不取估算");
+});
+
+test("手动压缩：force 不等阈值；可压部分低于地板则不压", () => {
+	const big = "字".repeat(40000); // ≈ 10000 token/轮
+	const branch = [...turn(1, "一", big, "ok"), ...turn(2, "二", big, "ok"), ...turn(3, "三", big, "ok")];
+	assert.equal(planDiscussionCompaction(branch, { contextWindow: 1000000 }), null, "远小于窗口，自动不压");
+	const plan = planDiscussionCompaction(branch, { contextWindow: 1000000, force: true })!;
+	assert.ok(plan, "手动：有可压轮次就压");
+	assert.equal(plan.firstKeptEntryId, "u2", "仍守最近一轮原文");
+	const small = [...turn(1, "一", "x", "ok"), ...turn(2, "二", "y", "ok")];
+	assert.equal(
+		planDiscussionCompaction(small, { contextWindow: 1000000, force: true, minCoveredTokens: 2000 }),
+		null,
+		"可压部分不足地板：不烧旁路调用",
+	);
+});
+
 test("前情压缩按文件：保留最后 N 个文件、跳过已覆盖、按字数到期；摘要条目记 coveredFiles", () => {
 	const chat = tmp();
 	try {
@@ -104,7 +131,7 @@ test("沙箱：正文/ 对原生写开放；历史/ 与 会话/ 拒绝；状态�
 		assert.equal(harnessManagedPath(cardDir, join(chat.dir, "历史", "检查点.jsonl")), true);
 		assert.equal(harnessManagedPath(cardDir, join(chat.dir, "会话", "x.jsonl")), true);
 		const scope = sandboxScope(root, { card: "cards/某卡/某卡.json" });
-		const grants = { dirs: [], bash: false };
+		const grants = { dirs: [], bashAllow: [] };
 		assert.equal(sandboxVerdict("write", { path: join(chat.dir, "正文", "001.md") }, scope, grants).kind, "allow");
 		assert.equal(sandboxVerdict("edit", { path: join(chat.dir, "历史", "检查点.jsonl") }, scope, grants).kind, "deny");
 		assert.equal(sandboxVerdict("read", { path: join(chat.dir, "历史", "检查点.jsonl") }, scope, grants).kind, "allow");
@@ -174,7 +201,7 @@ test("多项目物理隔离：第二个项目绝对禁止读取或修改第一�
 
 		// 在 chat2 的作用域下
 		const scope2 = sandboxScope(root, { card: "cards/某卡/某卡.json" }, chat2.dir);
-		const grants = { dirs: [], bash: false };
+		const grants = { dirs: [], bashAllow: [] };
 
 		// 读写项目1的正文：全部拒绝
 		assert.equal(sandboxVerdict("read", { path: join(chat1.dir, "正文", "001-初雪.md") }, scope2, grants).kind, "deny");

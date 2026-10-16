@@ -512,7 +512,7 @@ export const CARD_LEVEL_KEYS = [
 	"cardSkinOff",
 	"preset",
 	"sandboxAllow",
-	"sandboxBash",
+	"sandboxBashAllow",
 ] as const satisfies ReadonlyArray<keyof RpConfig>;
 
 export type CardLevelKey = (typeof CARD_LEVEL_KEYS)[number];

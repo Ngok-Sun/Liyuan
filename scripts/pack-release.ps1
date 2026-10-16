@@ -189,7 +189,9 @@ function Stage-Clean {
     # 卡＝工作空间：cards/<卡文件夹>/ 整棵是用户私有数据（卡本体 + 卡级配置 +
     # 每个子项目的会话/账本/世界线）。漏掉这一行 = 把用户的卡打进公开发布包。
     "cards",
-    "assets/gen", "assets/presets"
+    "assets/gen", "assets/presets",
+    # 资料保护（刀3）：快照对象仓与回收站都是用户数据（可能含卡/世界书正文），绝不随包
+    "assets/.vault", "assets/.回收站"
   )
   $xf = @(
     "*.log", "*.tsbuildinfo", ".DS_Store", "Thumbs.db",
@@ -416,7 +418,8 @@ if catalogs[0] != catalogs[1]:
 forbidden_dirs = ['.liyuan-memory/', '.liyuan-state/', '.liyuan-uploads/', '.liyuan-lore/',
                   '.liyuan-codex/', '.liyuan-assistant/', '.liyuan-worldline/', '.liyuan-media/',
                   '.liyuan-audio/', '.liyuan-cache/', '.superpowers/', 'scratch/', 'summaries/',
-                  'output/', 'persist/', 'artifacts/', 'test/', 'assets/presets/']
+                  'output/', 'persist/', 'artifacts/', 'test/', 'assets/presets/',
+                  'assets/.vault/', 'assets/.回收站/']
 for d in forbidden_dirs:
     hits = [n for n in names if ('/' + d) in n]
     if hits:

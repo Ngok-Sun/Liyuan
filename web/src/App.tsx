@@ -81,6 +81,7 @@ import {
 } from "./components/icons.tsx";
 import { LorebookPanel } from "./components/LorebookPanel.tsx";
 import { LoreDetailCenter } from "./components/LoreDetailCenter.tsx";
+import { BashDenylistCenter } from "./components/BashDenylistCenter.tsx";
 import type { LoreEntryView } from "./api.ts";
 import {
 	BackstageGroup,
@@ -302,6 +303,8 @@ export default function App() {
 	/** 讨论区检查点卡片点击 → 稿子视图历史里展开它 */
 	const [storyFocus, setStoryFocus] = useState<{ file?: string; checkpointId?: string; tick: number } | null>(null);
 	const [toolNote, setToolNote] = useState<string | null>(null);
+	/** 压缩进行中（引擎 compaction 帧驱动）：常驻到结束，含开始时刻做计时 */
+	const [compacting, setCompacting] = useState<{ detail: string; since: number } | null>(null);
 	/** 本轮过程步骤（实时清单渲染用；与 turnActsRef 同内容） */
 	const [liveActs, setLiveActs] = useState<WireActivity[]>([]);
 	const [toasts, setToasts] = useState<Toast[]>([]);
@@ -355,6 +358,7 @@ export default function App() {
 	const [floatPanel, setFloatPanel] = useState<PanelId | AgentPanelId | null>(null);
 	const [studioOpen, setStudioOpen] = useState(false);
 		const [centerLoreDetail, setCenterLoreDetail] = useState<{ entry: LoreEntryView; scopePath: string } | null>(null);
+		const [centerDenylist, setCenterDenylist] = useState(false);
 	const [dark, setDark] = useState(() => getTheme() === "dark");
 	/** 悬浮窗「刷新」用：+1 强制重挂载窗内面板（与侧栏 manualTick 同机制） */
 	const [floatTick, setFloatTick] = useState(0);
@@ -1071,8 +1075,17 @@ export default function App() {
 					setStats(frame.stats);
 					break;
 				case "compaction":
-					setToolNote(frame.state === "start" ? t("压缩上下文…") : null);
-					if (frame.state === "end") pushToast(frame.ok === false ? "warning" : "info", frame.ok === false ? t("压缩失败") : t("上下文已压缩"));
+					// 压缩起止（自动与手动同一条）：进行中常驻在底部状态栏（带计时），完成给一次提示。
+					// 文案由引擎给（detail），前端不解析 activity 字符串。
+					if (frame.state === "start") {
+						setCompacting({ detail: frame.detail?.trim() || t("正在压缩上下文…"), since: Date.now() });
+						setToolNote(frame.detail?.trim() || t("正在压缩上下文…"));
+					} else {
+						setCompacting(null);
+						setToolNote(null);
+						if (frame.ok === false) pushToast("warning", frame.detail?.trim() || t("压缩失败"));
+						else if (frame.detail?.trim()) pushToast("info", frame.detail.trim());
+					}
 					break;
 				case "sessions":
 					setSessions(frame.list);
@@ -1716,6 +1729,7 @@ export default function App() {
 					<SettingsPanel
 						toast={pushToast}
 						onOpenAbout={() => openLeft("about")}
+						onOpenDenylist={() => setCenterDenylist(true)}
 						currentVersion={updateInfo?.currentVersion}
 					/>
 				);
@@ -2722,6 +2736,18 @@ export default function App() {
 							return host ? createPortal(detailNode, host) : detailNode;
 						})()}
 					</div>
+					{/* 命令黑名单（docs/PLAN-AGENT-BACK-TO-PI.md §二）：挂在「中间栏」整列上——
+					    settings 入口随时可开，主页空态时 .stage-wrap 会塌，挂在它里面会截断 */}
+					{centerDenylist && (() => {
+						const denylistNode = (
+							<BashDenylistCenter
+								onClose={() => setCenterDenylist(false)}
+								toast={pushToast}
+							/>
+						);
+						const host = agentSplit ? pagesRef.current?.querySelector(".story-pane") : null;
+						return host ? createPortal(denylistNode, host) : denylistNode;
+					})()}
 					<footer
 						className="composer"
 						onDragOver={(e) => {
@@ -3009,7 +3035,7 @@ export default function App() {
 						{/* 会话用量：输入框下方，右缘与输入框齐平 */}
 						{!welcome && (
 							<div className="composer-shell session-stats-wrap">
-							<SessionStatsBar stats={stats} />
+							<SessionStatsBar stats={stats} compacting={compacting} />
 						</div>
 						)}
 					</footer>

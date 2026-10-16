@@ -716,10 +716,12 @@ function BackupSection({ toast }: { toast: (level: "info" | "warning" | "error",
 export function SettingsPanel({
 	toast,
 	onOpenAbout,
+	onOpenDenylist,
 	currentVersion,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
 	onOpenAbout?: () => void;
+	onOpenDenylist?: () => void;
 	currentVersion?: string;
 }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
@@ -829,6 +831,18 @@ export function SettingsPanel({
 						<div className="field-hint">
 							{t("开启后 agent 能操作本机（调用你的其他项目、查资料）；全部调用都会显示在过程条。仅在自己的设备上开启。")}
 						</div>
+						{onOpenDenylist && (
+							<>
+								<div className="access-actions" style={{ marginTop: 6 }}>
+									<button type="button" className="drawer-btn" onClick={onOpenDenylist}>
+										{t("命令黑名单")}
+									</button>
+								</div>
+								<div className="field-hint">
+									{t("命中即拒绝执行，agent 拿不到任何执行结果。名单是一份可改的文件，在中间栏展开查看与编辑。")}
+								</div>
+							</>
+						)}
 						<div className="toggle-row">
 							<span>{t("决策门禁（戏内选择卡）")}</span>
 							<Toggle

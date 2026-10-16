@@ -719,6 +719,26 @@ export function Bubble({
 			</button>
 		);
 	}
+	if (msg.channel === "compaction") {
+		// 压缩记录：一次压缩的留痕（压了什么、摘要全文可展开）。
+		// 摘要原本只落在会话树的自定义条目里，界面看不见——用户报「压完那份摘要我看不见」。
+		const c = msg.compaction;
+		if (!c) return null;
+		const n = (v: number | undefined) => (typeof v === "number" ? v.toLocaleString() : "—");
+		const what =
+			c.kind === "discussion"
+				? t("{turns} 轮 · {chars} 字 → 摘要 {summary} 字", { turns: n(c.turns), chars: n(c.chars), summary: c.summary.length.toLocaleString() })
+				: t("{turns} 章 · {chars} 字 → 摘要 {summary} 字", { turns: n(c.covered ?? c.turns), chars: n(c.chars), summary: c.summary.length.toLocaleString() });
+		return (
+			<details className="compaction-card">
+				<summary>
+					<span className="compaction-card-kind">{c.kind === "discussion" ? t("讨论") : t("前情提要")}</span>
+					<span className="compaction-card-text">{what}</span>
+				</summary>
+				<pre className="compaction-card-body">{c.summary}</pre>
+			</details>
+		);
+	}
 	if (msg.channel === "choice") {
 		// 留痕的决策选择卡（重放）：置灰只读，标注结果（D10：岔路口是剧情资产）
 		return msg.choice ? <ChoiceCard choice={msg.choice} /> : null;

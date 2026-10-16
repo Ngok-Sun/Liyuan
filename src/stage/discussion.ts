@@ -8,11 +8,22 @@ import { authoringHistory, contextText, type ConversationEntry, type ContextMess
 
 export const DISCUSSION_SUMMARY_TYPE = "liyuan-discussion-summary";
 
+/**
+ * 手动压缩的地板（估算 token）：可压部分低于它不值得烧一次旁路调用。
+ * 与文件压缩的 MANUAL_MIN_COMPACT_CHARS 同一精神——用户明确点了压缩，就不该拿「攒得还不够」挡回去，
+ * 但仍留一个下限：几百 token 的讨论压了等于没压。
+ */
+export const MANUAL_MIN_DISCUSSION_TOKENS = 2000;
+
 export interface DiscussionSummaryData {
 	summary: string;
 	/** 从这条起的条目照常回放（与 pi compaction 同名同义） */
 	firstKeptEntryId: string;
 	tokensBefore?: number;
+	/** 覆盖的讨论轮数（卡片显示用；老条目缺省） */
+	turns?: number;
+	/** 被压掉的原文规模（字；卡片显示用；老条目缺省） */
+	chars?: number;
 }
 
 /** 与 pi estimateTokens 同一把尺：字符数 / 4 */
@@ -26,6 +37,49 @@ export function estimateMessageTokens(m: ContextMessage): number {
 		}
 	} else chars = contextText(m.content).length;
 	return Math.ceil(chars / 4);
+}
+
+interface UsageLike { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number }
+
+/** prompt 侧占用（与 pi calculateContextTokens 同一口径） */
+function promptTokensOf(u: UsageLike): number {
+	const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+	if (prompt > 0) return prompt;
+	return Math.max(0, (u.totalTokens ?? 0) - (u.output ?? 0));
+}
+
+const estimateOf = (messages: ContextMessage[], summary?: string): number =>
+	messages.reduce((n, m) => n + estimateMessageTokens(m), 0) + Math.ceil((summary?.length ?? 0) / 4);
+
+/** 讨论侧的估算占用（含摘要）——压缩前后各取一次，比值即「压掉了多少份额」 */
+export function discussionTokens(branch: ConversationEntry[]): number {
+	const { live, summary } = liveDiscussion(branch);
+	return estimateOf(authoringHistory(live), summary);
+}
+
+/**
+ * 讨论的真实占用：最近一条带 usage 的 assistant 的 prompt 侧 token，其后消息用估算补齐
+ * （与 pi estimateContextTokens 同法）。判据必须用它——估算尺子（字符/4）对中文低估近一倍，
+ * 只看估算，「窗口 − 预留」这个阈值会落在真实溢出之后，压缩永远不触发（2026-10-16 实测坐实：
+ * 讨论估算 28 万 token 时真实 prompt 已到 54.9 万，一次没压过）。
+ */
+export function livePromptTokens(branch: ConversationEntry[]): number | null {
+	const { live } = liveDiscussion(branch);
+	const messages = authoringHistory(live);
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i]!;
+		if (m.role !== "assistant") continue;
+		const usage = m.usage as UsageLike | undefined;
+		if (!usage) continue;
+		const stop = m.stopReason as string | undefined;
+		if (stop === "aborted" || stop === "error") continue;
+		const tokens = promptTokensOf(usage);
+		if (tokens <= 0) continue;
+		let trailing = 0;
+		for (let j = i + 1; j < messages.length; j++) trailing += estimateMessageTokens(messages[j]!);
+		return tokens + trailing;
+	}
+	return null;
 }
 
 const latestSummary = (branch: ConversationEntry[]): { at: number; data: DiscussionSummaryData } | null => {
@@ -59,22 +113,44 @@ export interface DiscussionCompactPlan {
 	/** 待摘要的讨论（已序列化） */
 	conversationText: string;
 	previousSummary?: string;
+	/** 触发基准：真实占用（最近一次请求的 prompt 侧 usage），无 usage 时退估算 */
 	tokensBefore: number;
+	/** 压缩前的纯估算（字符/4）——压缩后指示器按「压掉的估算份额」折算真实占用 */
+	estimatedTokens: number;
 	turns: number;
 }
 
+export interface DiscussionCompactOptions {
+	contextWindow: number;
+	reserveTokens?: number;
+	keepRecentTokens?: number;
+	/** 手动压缩：不等阈值，有可压的轮次就压 */
+	force?: boolean;
+	/** 手动压缩的地板（估算 token）：可压部分低于它不值得烧一次旁路调用 */
+	minCoveredTokens?: number;
+}
+
 /**
- * 判定与切点（纯函数）。活着的讨论估算 token > contextWindow − reserveTokens 才压；从末尾按整轮（user 条目为界）
+ * 判定与切点（纯函数）。活着的讨论真实占用 > contextWindow − reserveTokens 才压；从末尾按整轮（user 条目为界）
  * 往前保留到 ≥ keepRecentTokens，其余摘要。至少保留最近一轮；至少摘掉一轮，否则不压。
+ * 触发基准是真实 usage 而非估算——估算对中文低估近一倍，只看估算阈值永远落在溢出之后。
  */
-export function planDiscussionCompaction(branch: ConversationEntry[], o: { contextWindow: number; reserveTokens?: number; keepRecentTokens?: number }): DiscussionCompactPlan | null {
+export function planDiscussionCompaction(branch: ConversationEntry[], o: DiscussionCompactOptions): DiscussionCompactPlan | null {
 	if (!(o.contextWindow > 0)) return null;
 	const reserve = o.reserveTokens ?? 16384;
 	const keepRecent = o.keepRecentTokens ?? 20000;
 	const { live, summary } = liveDiscussion(branch);
 	const messages = authoringHistory(live);
-	const tokensBefore = messages.reduce((n, m) => n + estimateMessageTokens(m), 0) + Math.ceil((summary?.length ?? 0) / 4);
-	if (tokensBefore <= o.contextWindow - reserve) return null;
+	const estimatedTokens = estimateOf(messages, summary);
+	const real = livePromptTokens(branch);
+	const tokensBefore = real ?? estimatedTokens;
+	if (!o.force && tokensBefore <= o.contextWindow - reserve) return null;
+	/**
+	 * 保留窗口与阈值同一把尺：估算（字符/4）对中文低估近一倍，不折算就等于「保留 40k 真实 token」——
+	 * 64k 窗口下压完仍在阈值之上，每拍都触发一次压缩却压不下去。
+	 */
+	const ratio = real !== null && estimatedTokens > 0 ? real / estimatedTokens : 1;
+	const keepTarget = ratio > 0 ? Math.max(1, Math.round(keepRecent / ratio)) : keepRecent;
 
 	const turnStarts = live.map((e, i) => (e.type === "message" && (e.message as ContextMessage | undefined)?.role === "user" && e.id ? i : -1)).filter((i) => i >= 0);
 	if (turnStarts.length < 2) return null;
@@ -83,13 +159,14 @@ export function planDiscussionCompaction(branch: ConversationEntry[], o: { conte
 	for (; cut > 0; cut--) {
 		const start = turnStarts[cut]!, end = cut + 1 < turnStarts.length ? turnStarts[cut + 1]! : live.length;
 		kept += authoringHistory(live.slice(start, end)).reduce((n, m) => n + estimateMessageTokens(m), 0);
-		if (kept >= keepRecent) break;
+		if (kept >= keepTarget) break;
 	}
 	if (cut <= 0) cut = 1;
 	const firstKeptEntryId = live[turnStarts[cut]!]!.id!;
 	const covered = authoringHistory(live.slice(0, turnStarts[cut]!));
 	if (!covered.length) return null;
-	return { firstKeptEntryId, conversationText: serializeDiscussion(covered), ...(summary ? { previousSummary: summary } : {}), tokensBefore, turns: cut };
+	if (o.minCoveredTokens !== undefined && estimateOf(covered) < o.minCoveredTokens) return null;
+	return { firstKeptEntryId, conversationText: serializeDiscussion(covered), ...(summary ? { previousSummary: summary } : {}), tokensBefore, estimatedTokens, turns: cut };
 }
 
 /** 讨论序列化：user / assistant 文本原样，工具调用与回执各压成一行（回执截 400 字） */

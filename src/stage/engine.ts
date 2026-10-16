@@ -18,7 +18,7 @@ import { authoringHistory, authoringRequestIds, contextText, conversationMode, C
 import { authoringTools, authoringSystemPrompt, runAuthoringTool, AUTHORING_NATIVE_TOOLS, CONVERSATION_MODE_TOOL } from "./authoring.ts";
 import { AGENT_ASK_TOOL, AGENT_SCREENSHOT_TOOL, agentSystemPrompt, buildAgentStateBlock } from "./agent.ts";
 import { describeChange, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type ChangeSet } from "./story-history.ts";
-import { agentHistory, buildDiscussionSummaryPrompt, DISCUSSION_SUMMARY_TYPE, planDiscussionCompaction } from "./discussion.ts";
+import { agentHistory, buildDiscussionSummaryPrompt, discussionTokens, DISCUSSION_SUMMARY_TYPE, livePromptTokens, MANUAL_MIN_DISCUSSION_TOKENS, planDiscussionCompaction } from "./discussion.ts";
 import { readFileSync } from "node:fs";
 import { createSandboxGate, sandboxGrantsFromBranch, SANDBOX_GRANT_TYPE } from "../sandbox.ts";
 import { fileChangeOf } from "../activity-format.ts";
@@ -207,6 +207,11 @@ export interface StageEvents {
 	onNotify?: (level: "info" | "warning" | "error", text: string) => void;
 	/** 过程条短句（验收/修订进度；kind:"note" 形态，无需工具名） */
 	onActivity?: (detail: string) => void;
+	/**
+	 * 压缩起止（结构化，宿主转 compaction 帧）。文案由引擎给——前端不许解析 activity 字符串
+	 * 反推「是不是在压缩」（那是识别器）。kind：discussion＝讨论层（真上下文）、story＝前情/前情提要。
+	 */
+	onCompaction?: (e: { state: "start" | "end"; kind: "discussion" | "story"; detail: string; ok?: boolean }) => void;
 }
 
 /**
@@ -589,6 +594,12 @@ export class StageEngine {
 	#turnMode?: ConversationMode;
 	/** 子项目形态缓存（对话.json 只在建项目时写，按会话目录记一次即可） */
 	#chatMode?: { sessionDir: string; mode: "agent" | undefined };
+	/**
+	 * 压缩后的上下文占用覆盖值（真实单位）。指示器默认取 pi 的「上一轮请求真实 usage」，
+	 * 而压缩条目是 custom entry、不改 pi 的消息列表——压完数字纹丝不动。压缩发生时按
+	 * 「压掉的估算份额」折算一次，落到这里；下一拍新 usage 落地即清（那才是新的事实）。
+	 */
+	#ctxOverride: { sessionId: string; tokens: number } | null = null;
 
 	/**
 	 * agent 是子项目属性（对话.json 的 mode），压过树上的 liyuan-mode 条目；扮演/工作仍由树上条目决定。
@@ -1115,6 +1126,8 @@ export class StageEngine {
 		};
 
 		const finish = async (): Promise<StageTurnEndInfo> => {
+			// 本拍的真实 usage 即将成为新的事实：上一拍压缩留下的折算值到此作废
+			this.#ctxOverride = null;
 			if (authoringTurn) {
 				const info = finishAuthoring();
 				if (agentTurn) {
@@ -1527,9 +1540,23 @@ export class StageEngine {
 	}
 
 	/**
-	 * 手动压缩（/compact）：不等周期，立刻把早期剧情摘要成 rp-summary。
-	 * everyNTurns=1 + 更低的字数地板 = 「只要真有可裁的早期剧情就压」
-	 * （仍守最近 KEEP_RECENT_BEATS 拍原文，续演点不动）。
+	 * 压缩后的上下文占用（真实单位）。undefined = 无覆盖，宿主沿用 pi 的实测值。
+	 * 只在「压缩刚发生、下一拍真实 usage 还没落地」这个窗口里有值——那正是用户看指示器的时刻。
+	 */
+	contextUsage(): { tokens: number; contextWindow: number; percent: number } | undefined {
+		const o = this.#ctxOverride;
+		if (!o) return undefined;
+		if (this.#deps.getSession().sessionManager.getSessionId() !== o.sessionId) return undefined;
+		const win = typeof this.#deps.getModel()?.contextWindow === "number" ? (this.#deps.getModel()!.contextWindow as number) : 0;
+		if (!(win > 0)) return undefined;
+		return { tokens: o.tokens, contextWindow: win, percent: (o.tokens / win) * 100 };
+	}
+
+	/**
+	 * 手动压缩（/compact）：不等周期，立刻压。
+	 * **agent 子项目压讨论层**——上下文就是讨论（工具调用与回执都在里面），正文只是文件、
+	 * 本就不在上下文里（「压缩上下文」压文件等于什么都没压，2026-10-16 用户实测报）；
+	 * 正文侧的【前情提要】由检查点自动刷新，不走这个按钮。扮演/工作模式照旧压拍（rp-summary）。
 	 * 流式中拒绝——压缩要改上下文，不能与正在装配的一拍打架。
 	 */
 	async compactNow(): Promise<CompactOutcome> {
@@ -1539,6 +1566,10 @@ export class StageEngine {
 		this.#busy = true;
 		try {
 			const { apiKey, headers } = await this.#deps.getAuth(model);
+			const sm = this.#deps.getSession().sessionManager;
+			if (chatModeOfSessionDir(sm.getSessionDir?.()) === "agent") {
+				return await this.#compactDiscussion(model, { apiKey, headers }, sm, this.#deps.events ?? {}, { force: true });
+			}
 			return await this.#compact(model, { apiKey, headers }, 1, MANUAL_MIN_COMPACT_CHARS);
 		} catch (err) {
 			return { kind: "failed", error: err instanceof Error ? err.message : String(err) };
@@ -1639,26 +1670,57 @@ export class StageEngine {
 	}
 
 	/**
-	 * 讨论层压缩（docs/PLAN-AGENT-CODING.md §六.3）：判据照 pi（估算 token > 上下文窗口 − 预留），摘要由旁路模型写，
+	 * 讨论层压缩（docs/PLAN-AGENT-CODING.md §六.3）：判据照 pi（真实占用 > 上下文窗口 − 预留），摘要由旁路模型写，
 	 * 落 liyuan-discussion-summary 条目，agentHistory 从 firstKeptEntryId 起回放。叶守卫同前情压缩。
+	 * force = 手动 /compact：不等阈值，有可压轮次就压（仍守最近一轮原文）。
 	 */
-	async #compactDiscussion(model: StageModelLike, auth: { apiKey?: string; headers?: Record<string, string | null> }, sm: StageSessionManager, ev: StageEvents): Promise<void> {
+	async #compactDiscussion(model: StageModelLike, auth: { apiKey?: string; headers?: Record<string, string | null> }, sm: StageSessionManager, ev: StageEvents, opts?: { force?: boolean }): Promise<CompactOutcome> {
 		const contextWindow = typeof model.contextWindow === "number" ? model.contextWindow : 0;
-		if (!(contextWindow > 0)) return;
+		if (!(contextWindow > 0)) return { kind: "skipped", reason: "no-window" };
 		try {
-			const plan = planDiscussionCompaction(sm.getBranch() as BranchEntryLike[], { contextWindow });
-			if (!plan) return;
+			const branch = sm.getBranch() as BranchEntryLike[];
+			const plan = planDiscussionCompaction(branch, {
+				contextWindow,
+				...(opts?.force ? { force: true, minCoveredTokens: MANUAL_MIN_DISCUSSION_TOKENS } : {}),
+			});
+			if (!plan) return { kind: "skipped", reason: opts?.force ? "nothing-to-compact" : "not-due" };
 			const leafBefore = sm.getLeafId();
-			ev.onActivity?.(`正在压缩讨论（${plan.turns} 轮 · 约 ${plan.tokensBefore} token）…`);
+			const startDetail = `正在压缩讨论（${plan.turns} 轮 · 约 ${plan.tokensBefore} token）…`;
+			ev.onActivity?.(startDetail);
+			ev.onCompaction?.({ state: "start", kind: "discussion", detail: startDetail });
 			const prompt = buildDiscussionSummaryPrompt({ conversationText: plan.conversationText, ...(plan.previousSummary ? { previousSummary: plan.previousSummary } : {}) });
 			const resp = await this.#sideText(model, prompt.systemPrompt, prompt.userText, auth, 4096, "compact");
-			if (typeof resp !== "string" || !resp.trim()) { console.error(`[stage-discussion] 压缩跳过：${typeof resp === "string" ? "摘要为空" : resp.error}`); return; }
-			if (sm.getLeafId() !== leafBefore) { ev.onActivity?.("讨论压缩已丢弃（期间切换了分支）"); return; }
-			sm.appendCustomEntry(DISCUSSION_SUMMARY_TYPE, { summary: resp.trim(), firstKeptEntryId: plan.firstKeptEntryId, tokensBefore: plan.tokensBefore });
+			if (typeof resp !== "string" || !resp.trim()) {
+				const error = typeof resp === "string" ? "摘要为空" : resp.error;
+				console.error(`[stage-discussion] 压缩跳过：${error}`);
+				ev.onCompaction?.({ state: "end", kind: "discussion", ok: false, detail: `讨论压缩失败：${error}` });
+				return { kind: "failed", error };
+			}
+			if (sm.getLeafId() !== leafBefore) {
+				ev.onActivity?.("讨论压缩已丢弃（期间切换了分支）");
+				ev.onCompaction?.({ state: "end", kind: "discussion", ok: false, detail: "讨论压缩已丢弃（期间切换了分支）" });
+				return { kind: "stale" };
+			}
+			const summary = resp.trim();
+			sm.appendCustomEntry(DISCUSSION_SUMMARY_TYPE, { summary, firstKeptEntryId: plan.firstKeptEntryId, tokensBefore: plan.tokensBefore, turns: plan.turns, chars: plan.conversationText.length });
 			sm.flush();
-			ev.onActivity?.(`讨论已压缩：${plan.turns} 轮 → 摘要 ${resp.trim().length} 字`);
+			// 指示器折算：压缩前/后的估算份额 × 最近一次真实占用 = 压缩后的上下文占用。
+			// 压缩改的是回放，不改 pi 的消息列表——不算这一笔，右下角的数字会一直停在压缩前。
+			const after = sm.getBranch() as BranchEntryLike[];
+			const estAfter = discussionTokens(after);
+			const real = livePromptTokens(after);
+			if (real && plan.estimatedTokens > 0 && estAfter < plan.estimatedTokens) {
+				this.#ctxOverride = { sessionId: sm.getSessionId(), tokens: Math.max(1, Math.round(real * (estAfter / plan.estimatedTokens))) };
+			}
+			const doneDetail = `讨论已压缩：${plan.turns} 轮 → 摘要 ${summary.length} 字`;
+			ev.onActivity?.(doneDetail);
+			ev.onCompaction?.({ state: "end", kind: "discussion", ok: true, detail: doneDetail });
+			return { kind: "compacted", summary, turns: plan.turns, chars: plan.conversationText.length };
 		} catch (err) {
-			console.error(`[stage-discussion] 压缩异常：${err instanceof Error ? err.message : String(err)}`);
+			const msg = err instanceof Error ? err.message : String(err);
+			console.error(`[stage-discussion] 压缩异常：${msg}`);
+			ev.onCompaction?.({ state: "end", kind: "discussion", ok: false, detail: `讨论压缩异常：${msg}` });
+			return { kind: "failed", error: msg };
 		}
 	}
 
@@ -1688,6 +1750,7 @@ export class StageEngine {
 						? (text) => this.#deps.archiveCompacted!(sm.getSessionId(), text)
 						: undefined,
 					onActivity: (d) => ev.onActivity?.(d),
+					onCompaction: (e) => ev.onCompaction?.({ ...e, kind: "story" }),
 				},
 				{
 					branch,

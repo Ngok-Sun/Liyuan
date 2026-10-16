@@ -8702,6 +8702,74 @@ label.drawer-btn {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+/* 压缩记录卡片（对话流内联）：一行摘要信息，展开读摘要全文 */
+.compaction-card {
+	margin: 6px 0;
+	padding: 8px 12px;
+	border: 1px dashed color-mix(in srgb, var(--accent) 30%, var(--hairline));
+	border-radius: 10px;
+	background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+	color: var(--text);
+	font-size: 13px;
+}
+.compaction-card summary {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	cursor: pointer;
+	list-style: none;
+}
+.compaction-card summary::-webkit-details-marker {
+	display: none;
+}
+.compaction-card-kind {
+	flex: none;
+	padding: 0 7px;
+	border-radius: 999px;
+	background: var(--text-soft);
+	color: var(--surface, #fff);
+	font-size: 11px;
+	line-height: 18px;
+}
+.compaction-card-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-soft);
+}
+.compaction-card-body {
+	margin: 8px 0 0;
+	padding: 8px 10px;
+	max-height: 40vh;
+	overflow: auto;
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--text) 4%, transparent);
+	font-family: inherit;
+	font-size: 12.5px;
+	line-height: 1.55;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+/* 压缩进行中（会话状态栏内）：常驻到结束，点旁边数字看详情 */
+.stats-compacting {
+	margin-left: 8px;
+	color: var(--accent);
+	white-space: nowrap;
+}
+.stats-compacting-dot {
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-right: 5px;
+	border-radius: 50%;
+	background: var(--accent);
+	animation: stats-compacting-pulse 1s ease-in-out infinite;
+	vertical-align: middle;
+}
+@keyframes stats-compacting-pulse {
+	0%, 100% { opacity: 0.25; }
+	50% { opacity: 1; }
+}
 /* 新建项目弹窗：形态选择 */
 .spv2-modal-modes {
 	display: flex;

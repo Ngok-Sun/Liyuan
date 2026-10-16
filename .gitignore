@@ -71,6 +71,10 @@ assets/ab-test/
 assets/import-test/
 assets/personas/
 
+# 资料保护（刀3）：快照对象仓与回收站都是用户数据（可能含卡/世界书正文），不入库
+assets/.vault/
+assets/.回收站/
+
 # 卡＝工作空间（cards/<卡文件夹>/）：卡本体、卡级配置、每个子项目的会话与账本全在里面，
 # 整棵都是用户私有数据。与上面同一条红线：卡不进公开产物。
 # 同口径的另两处：pack-release.ps1 的 $xd（发布包排除）、.dockerignore。

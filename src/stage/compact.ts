@@ -191,6 +191,8 @@ export interface CompactRunDeps {
 	/** 被裁正文归档进剧情库（供 memory_search 召回细节）；失败只丢召回能力 */
 	archive?: (text: string) => Promise<void>;
 	onActivity?: (detail: string) => void;
+	/** 结构化的压缩起止（宿主转 compaction 帧；文案由这里给，不靠前端解析字符串） */
+	onCompaction?: (e: { state: "start" | "end"; ok?: boolean; detail: string }) => void;
 }
 
 export interface CompactRunInput {
@@ -228,7 +230,14 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 	if (!plan) return { kind: "skipped", reason: "not-due" };
 
 	const leafBefore = deps.getLeafId();
-	deps.onActivity?.(`正在压缩前情（${plan.turns} 拍 · ${plan.conversationText.length} 字）…`);
+	// 两种压缩的语义不同，文案必须分开：扮演压的是「拍」（真上下文，压完历史变短）；
+	// agent 压的是「章」（正文文件，本就不在上下文里，产物只是【前情提要】的刷新）。
+	const fileMode = plan.coveredFiles !== undefined;
+	const startDetail = fileMode
+		? `正在刷新前情提要（${plan.turns} 章 · ${plan.conversationText.length} 字）…`
+		: `正在压缩前情（${plan.turns} 拍 · ${plan.conversationText.length} 字）…`;
+	deps.onActivity?.(startDetail);
+	deps.onCompaction?.({ state: "start", detail: startDetail });
 
 	const prompt = buildRpSummaryPrompt({
 		conversationText: plan.conversationText,
@@ -238,13 +247,20 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 		userName: input.userName,
 	});
 	const resp = await deps.sideText(prompt.systemPrompt, prompt.userText);
-	if (typeof resp !== "string") return { kind: "failed", error: resp.error };
+	if (typeof resp !== "string") {
+		deps.onCompaction?.({ state: "end", ok: false, detail: `${fileMode ? "前情提要刷新" : "压缩"}失败：${resp.error}` });
+		return { kind: "failed", error: resp.error };
+	}
 	const summary = resp.trim();
-	if (!summary) return { kind: "failed", error: "摘要为空" };
+	if (!summary) {
+		deps.onCompaction?.({ state: "end", ok: false, detail: `${fileMode ? "前情提要刷新" : "压缩"}失败：摘要为空` });
+		return { kind: "failed", error: "摘要为空" };
+	}
 
 	// R9 叶守卫：调用期间树动过（swipe/rewind/切线）→ 整体丢弃
 	if (deps.getLeafId() !== leafBefore) {
 		deps.onActivity?.("压缩已丢弃（本拍期间切换了分支）");
+		deps.onCompaction?.({ state: "end", ok: false, detail: "压缩已丢弃（本拍期间切换了分支）" });
 		return { kind: "stale" };
 	}
 
@@ -264,6 +280,10 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 		chars: plan.conversationText.length,
 		...(plan.coveredFiles ? { coveredFiles: plan.coveredFiles } : {}),
 	});
-	deps.onActivity?.(`前情已压缩：${plan.turns} 拍 ${plan.conversationText.length} 字 → 摘要 ${summary.length} 字`);
+	const doneDetail = fileMode
+		? `前情提要已刷新：${plan.turns} 章 ${plan.conversationText.length} 字 → 摘要 ${summary.length} 字`
+		: `前情已压缩：${plan.turns} 拍 ${plan.conversationText.length} 字 → 摘要 ${summary.length} 字`;
+	deps.onActivity?.(doneDetail);
+	deps.onCompaction?.({ state: "end", ok: true, detail: doneDetail });
 	return { kind: "compacted", summary, turns: plan.turns, chars: plan.conversationText.length };
 }
