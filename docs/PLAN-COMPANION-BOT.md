@@ -190,7 +190,7 @@ bot 抽屉 / 浮窗（TG/QQ bot 形态）、线程渲染与流式、历史加载
 ## 九、状态
 
 - 2026-10-16 立案，未开工。
-- 2026-10-16 **刀 1 落地（引擎＋CLI），实弹验收全过**。
+- 2026-10-16 **刀 1 落地（引擎＋CLI），实弹验收全过（已随 `f106efb` 提交）**。
   - 改：`src/stage/bot.ts`（新：线程存储／装配／视野／工具面／小循环）、`assets/BOT.md`（新：默认人设，随包播种到 agentDir）、`src/stage/engine.ts`（`botTurn`＋`#botAbort`）、`src/stage/authoring.ts`（`cardToolAvailable` 导出）、`server/main.ts`（`/bot` 拦截＋`handleBotPrompt`＋`[end] mode=bot` 终端标记）、`src/commands.ts`（`/bot` 进补全）、`src/i18n/en/server.ts`（5 条）、`src/paths.ts`（BOT.md 播种）、`test/bot.test.ts`（14 条）。
   - 两处实现级修正（与 §四 原文不同，**以此为准**）：①线程落点＝子项目级 `<子项目>/副编剧.jsonl`（见 §4.3 注）；②原生七工具暂缓（见 §4.2 注，刀 2 前必须落）。
   - 单测 14 条；全量 873 项 871 过（2 项既有实卡红：cardfront-pipeline、mvu）；i18n-check 干净；对触及文件跑 tsc 无新增诊断。
