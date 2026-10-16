@@ -189,9 +189,9 @@ function Stage-Clean {
     # 卡＝工作空间：cards/<卡文件夹>/ 整棵是用户私有数据（卡本体 + 卡级配置 +
     # 每个子项目的会话/账本/世界线）。漏掉这一行 = 把用户的卡打进公开发布包。
     "cards",
-    "assets/gen", "assets/presets",
+    "gen", "presets",
     # 资料保护（刀3）：快照对象仓与回收站都是用户数据（可能含卡/世界书正文），绝不随包
-    "assets/.vault", "assets/.回收站"
+    ".vault", ".回收站", "assets/.vault", "assets/.回收站"
   )
   $xf = @(
     "*.log", "*.tsbuildinfo", ".DS_Store", "Thumbs.db",
@@ -259,6 +259,14 @@ function Stage-Clean {
   $presets = Join-Path $dest "assets\presets"
   if (Test-Path $presets) {
     Remove-Item $presets -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  # 资料保护（刀3）：快照对象仓与回收站二次防御清除
+  foreach ($leakDir in @(".vault", ".回收站")) {
+    $p = Join-Path $dest "assets\$leakDir"
+    if (Test-Path $p) {
+      Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 
   # Drop test / internal tooling from release tree

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Liyuan (梨园) · Official Documentation & Architecture Guide</title>
-  <meta name="description" content="Liyuan v1.6.3 Official Documentation: An RP Agent built on pi, bringing coding agent superpowers to role-playing. Featuring dual-mode storytelling, Theme Center, transparent wallpapers, and deterministic memory." />
+  <meta name="description" content="Liyuan v1.6.4 Official Documentation: An RP Agent built on pi, bringing coding agent superpowers to role-playing. Featuring dual-mode storytelling, Theme Center, transparent wallpapers, and deterministic memory." />
   <link rel="icon" href="images/logo.png" type="image/png" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -19,7 +19,7 @@
       <img class="brand-logo" src="images/logo.png" alt="Liyuan" />
       <div class="brand-title">
         Liyuan <span>(梨园)</span>
-        <span class="badge-version">v1.6.3</span>
+        <span class="badge-version">v1.6.4</span>
       </div>
     </div>
 
@@ -153,7 +153,7 @@
           <div class="hero-meta-grid">
             <div class="meta-card">
               <div class="meta-card-label">Version</div>
-              <div class="meta-card-value">v1.6.3</div>
+              <div class="meta-card-value">v1.6.4</div>
             </div>
             <div class="meta-card">
               <div class="meta-card-label">Core Engine</div>
@@ -734,7 +734,7 @@ npm run web          # Launch server on http://127.0.0.1:7620</code></pre>
             <details class="faq-item">
               <summary class="faq-summary">Q2: How does Liyuan ensure multiple projects under the same card don't leak or read each other?</summary>
               <div class="faq-content">
-                Liyuan v1.6.3 enforces physical isolation:
+                Liyuan v1.6.4 enforces physical isolation:
                 <ol>
                   <li><strong>Sandbox Guard (isOtherChatPath)</strong>: Native tools trying to read, edit, or grep another project's directory are intercepted and <code>DENY</code>-rejected at the sandbox layer.</li>
                   <li><strong>State Block Summary Isolation</strong>: Agent mode state blocks strictly prohibit cross-project resident summaries, ensuring fresh projects start with 0% contamination.</li>
@@ -806,7 +806,7 @@ npm run web          # Launch server on http://127.0.0.1:7620</code></pre>
 
   <!-- ================= Footer ================= -->
   <footer class="site-footer">
-    <p>Liyuan (梨园) v1.6.3 · Built on pi · Bringing Coding Agent Superpowers to Roleplay</p>
+    <p>Liyuan (梨园) v1.6.4 · Built on pi · Bringing Coding Agent Superpowers to Roleplay</p>
     <p style="margin-top: 6px; font-size: 0.8rem;">
       <a href="https://github.com/weidu12123/Liyuan" target="_blank" rel="noreferrer">GitHub Repository</a> ·
       <a href="https://github.com/weidu12123/Liyuan/releases/latest" target="_blank" rel="noreferrer">Releases</a> ·
