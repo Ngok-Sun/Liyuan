@@ -989,6 +989,68 @@ test("pi：工具过程持久化但扮演隐藏；重生成复用同一 user 并
 	}
 });
 
+test("引擎：导演备注随本拍装配送达、不落树、一次即焚（PLAN-DIRECTOR-NOTE）", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const contexts: any[] = [];
+		reg.setResponses([
+			...directBeat((ctx) => { contexts.push(ctx); return fauxAssistantMessage("第一拍。"); }),
+			...directBeat((ctx) => { contexts.push(ctx); return fauxAssistantMessage("第二拍。"); }),
+		] as never);
+		const engine = await makeEngine(cwd, sm, reg.getModel("faux-rp"));
+
+		await engine.performTurn("我上前行礼。", "让她傲娇一点，别急着答应。");
+		await engine.performTurn("我再走近一步。");
+
+		const first = JSON.stringify(contexts[0].messages);
+		const second = JSON.stringify(contexts[1].messages);
+		assert.ok(first.includes("【导演备注】") && first.includes("让她傲娇一点"), "第一拍送模带备注");
+		assert.ok(!second.includes("【导演备注】"), "备注一次即焚，下一拍不带");
+		const users = (sm.getBranch() as any[]).filter((e) => e.type === "message" && e.message?.role === "user");
+		assert.equal(users.length, 2, "两拍各一条原话");
+		assert.ok(!JSON.stringify(users.map((e) => e.message.content)).includes("导演备注"), "树上只有原话，备注不落树");
+		// 只作显示的记录：随回复落 details.rpNotes（前端在用户气泡下渲染备注小气泡；模型看不见）
+		const asst = (sm.getBranch() as any[]).filter((e) => e.type === "message" && e.message?.role === "assistant");
+		assert.deepEqual(asst[0]?.message?.details?.rpNotes, ["让她傲娇一点，别急着答应。"], "第一拍回复记下备注");
+		assert.equal(asst[1]?.message?.details?.rpNotes, undefined, "无备注的拍不记");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎：重 roll 带导演备注（regenerate 路径），树上仍只有原话", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const contexts: any[] = [];
+		reg.setResponses(directBeat((ctx) => { contexts.push(ctx); return fauxAssistantMessage("第一版。"); }) as never);
+		const engine = await makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		await engine.performTurn("我推开门。");
+
+		// 重 roll：叶钉回 user（与 regenerateSwipe 同形），带备注再生成
+		const session = sessionByEngine.get(engine)!;
+		const user = (sm.getBranch() as any[]).find((e) => e.type === "message" && e.message?.role === "user");
+		session.setLeaf(user.id);
+		reg.setResponses(directBeat((ctx) => { contexts.push(ctx); return fauxAssistantMessage("第二版。"); }) as never);
+		await engine.regenerate("更冷淡一些，别马上软化。");
+
+		const rolled = JSON.stringify(contexts[1].messages);
+		assert.ok(rolled.includes("【导演备注】") && rolled.includes("更冷淡一些"), "重 roll 送模带备注");
+		const users = (sm.getBranch() as any[]).filter((e) => e.type === "message" && e.message?.role === "user");
+		assert.equal(users.length, 1, "重 roll 不追加用户输入");
+		assert.ok(!JSON.stringify(users[0].message.content).includes("导演备注"), "备注不落树");
+		assert.equal(listReplyVariants(sm.getEntries().map((e) => ({ ...e, role: e.type === "message" ? e.message.role : undefined })), user.id, sm.getLeafId()).length, 2, "两条变体各自保留");
+		// 记录挂在**变体**上：重 roll 出的新回复带自己的备注（切变体时气泡跟着变）
+		const asst = (sm.getBranch() as any[]).filter((e) => e.type === "message" && e.message?.role === "assistant");
+		assert.deepEqual(asst[asst.length - 1]?.message?.details?.rpNotes, ["更冷淡一些，别马上软化。"], "重 roll 变体记下备注");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("pi：ask 等用户答复，后续工具顺序执行，答案经 toolResult 回喂", { timeout: 5000 }, async () => {
 	const { cwd, sm } = makeStage();
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });

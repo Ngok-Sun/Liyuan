@@ -203,4 +203,5 @@ export const messages: Record<string, string> = {
 	"撤销本轮输入与讨论？\n讨论将回到本轮输入之前。": "Revert this turn's input and discussion?\nThe discussion will return to before this turn's input.",
 	"重新生成本轮回复": "Regenerate this reply",
 	"重试": "Retry",
+	"备注：生成这一拍时随行的戏外指示，不进入剧情历史": "Note: an out-of-scene instruction carried while generating this beat; never enters the story history",
 };

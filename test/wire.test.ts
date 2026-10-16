@@ -297,6 +297,20 @@ test("压缩记录卡片：两种摘要条目 → compaction 通道，带摘要�
 	assert.equal(toWireMsg({ role: "custom", customType: "rp-summary", content: "旧格式无投影" }, names), null, "没有投影的条目不上屏");
 });
 
+test("导演备注（只作显示）：回复 details.rpNotes → notes 字段；空白与非字符串过滤、无则不挂", () => {
+	const msg = toWireMsg(
+		{
+			role: "assistant",
+			content: [{ type: "text", text: "她别过脸去。" }],
+			details: { rpNotes: ["让她傲娇一点，别急着答应。", "  ", 42, "节奏放慢些。"] },
+		},
+		names,
+	);
+	assert.equal(msg?.channel, "narrative");
+	assert.deepEqual(msg?.notes, ["让她傲娇一点，别急着答应。", "节奏放慢些。"], "空白与非字符串过滤");
+	assert.equal(toWireMsg({ role: "assistant", content: [{ type: "text", text: "正文" }] }, names)?.notes, undefined, "无备注不挂字段");
+});
+
 test("开场白/导入也走 prepareDisplayText：未知标签 unwrap，围栏留给前端 markdown", () => {
 	const raw = `洛清霜说完。\n\n<Options>\n\`\`\`\n选择1: 【留下】\n选择2: 【下山】\n\`\`\`\n</Options>`;
 	const g = toWireMsg({ role: "custom", customType: "rp-greeting", content: raw }, names);

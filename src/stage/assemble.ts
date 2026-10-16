@@ -458,6 +458,11 @@ export interface StageInjectionOptions {
 	rosterIndex?: string;
 	/** 剧情记忆召回块（向量库被动召回，受设置「每轮自动检索并注入模型」管辖；关或无命中则不出块） */
 	memoryRecall?: string;
+	/**
+	 * 导演备注（PLAN-DIRECTOR-NOTE）：用户当拍的戏外指示。瞬时变量——宿主暂存、随调用传入、
+	 * 用完即焚；不落树、不进历史/场记/记忆/压缩。无值时不发射，输出与既有逐字相同。
+	 */
+	directorNote?: string;
 }
 
 /**
@@ -480,6 +485,7 @@ export function buildStageInjection({
 	rosterIndex,
 	memoryRecall,
 	passiveLore,
+	directorNote,
 }: StageInjectionOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const blocks: string[] = [];
@@ -543,6 +549,12 @@ export function buildStageInjection({
 		blocks.push(
 			`【语言纠正】你上一拍使用了错误的语言。从本拍起，全部叙事与对白必须使用${config.language}（专有名词可保留原文）。这是硬性要求，立即纠正。`,
 		);
+	}
+
+	// 导演备注（PLAN-DIRECTOR-NOTE）：末块——紧贴用户原话之前，对当拍演出的指示权重最大。
+	// 用户自己的话，原文直通；无值不出块（有备注才存在，不是 harness 新增的句子——铁律一）。
+	if (directorNote?.trim()) {
+		blocks.push(`【导演备注】\n${directorNote.trim()}`);
 	}
 
 	return blocks.join("\n\n");

@@ -2073,6 +2073,91 @@ html[data-theme="dark"] .msg-md-code {
 	font-style: italic;
 }
 
+/* ── 备注行（PLAN-DIRECTOR-NOTE）：输入卡内、正文框上方；发送/重 roll 随行，不进剧情历史 ── */
+.note-rows {
+	flex: 0 0 100%;
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 2px 6px 4px;
+	border-bottom: 1px dashed var(--hairline);
+	margin-bottom: 4px;
+}
+.note-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	color: var(--text-faint);
+}
+.note-row > svg {
+	flex: none;
+	opacity: 0.75;
+}
+.note-input {
+	flex: 1;
+	min-width: 0;
+	border: none;
+	background: none;
+	outline: none;
+	font: inherit;
+	font-size: 13.5px;
+	line-height: 1.5;
+	color: var(--text-soft);
+	padding: 3px 0;
+	caret-color: var(--accent);
+}
+.note-input::placeholder {
+	color: var(--text-faint);
+}
+.note-x {
+	display: grid;
+	place-items: center;
+	flex: none;
+	border: none;
+	background: none;
+	color: var(--text-faint);
+	cursor: pointer;
+	padding: 3px;
+	border-radius: 50%;
+}
+.note-x:hover {
+	color: var(--accent);
+	background: var(--accent-wash);
+}
+
+/* ── 备注小气泡：挂在角色回复顶部（视觉上位于用户气泡之下）；只作显示 ── */
+.msg-notes {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+	margin: 2px 0 6px;
+	padding-left: 2px;
+}
+.msg-note {
+	display: inline-flex;
+	align-items: flex-start;
+	gap: 6px;
+	max-width: min(100%, 560px);
+	padding: 4px 10px;
+	background: var(--accent-wash);
+	border: 1px dashed color-mix(in srgb, var(--accent) 30%, var(--hairline-strong));
+	border-radius: 12px;
+	font-size: 12.5px;
+	line-height: 1.5;
+	color: var(--text-soft);
+}
+.msg-note > svg {
+	flex: none;
+	margin-top: 3px;
+	opacity: 0.7;
+}
+.msg-note-text {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
 /* ── 上传区面板:文件行 ── */
 .upload-row {
 	display: flex;
@@ -2396,6 +2481,7 @@ html[data-theme="dark"] .msg-md-code {
 
 .composer-box {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: flex-end;
 	gap: 4px;
 	background: var(--surface);

@@ -260,6 +260,19 @@ test("末端注入：字数一行纯事实（§2.2）；无目标不出行", () 
 	assert.ok(!none.includes("800–1500"), "无预设兜底数字随 D1 迁出（默认预设数据承接）");
 });
 
+test("末端注入：导演备注——有则成末块（紧贴原话之前），无则逐字不变（PLAN-DIRECTOR-NOTE）", () => {
+	const base = buildStageInjection({ state: defaultState(), activatedLore: [], card, config });
+	assert.ok(!base.includes("【导演备注】"), "无备注不出块");
+	const withNote = buildStageInjection({
+		state: defaultState(), activatedLore: [], card, config,
+		directorNote: "  让她傲娇一点，别急着答应。  ",
+	});
+	assert.ok(withNote.endsWith("【导演备注】\n让她傲娇一点，别急着答应。"), "备注成末块且首尾空白已去");
+	assert.equal(withNote.slice(0, base.length), base, "有备注时其余输出与无备注逐字一致");
+	const blank = buildStageInjection({ state: defaultState(), activatedLore: [], card, config, directorNote: "   " });
+	assert.equal(blank, base, "空白备注视同无备注");
+});
+
 test("detectsLanguageMismatch：中文目标才判、样本要够长", () => {
 	const en = "The moon hangs over the courtyard while she waits in silence for a long time tonight.";
 	assert.equal(detectsLanguageMismatch(en, "中文"), true);

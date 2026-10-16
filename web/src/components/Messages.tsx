@@ -26,6 +26,7 @@ import {
 	IconChevronRight,
 	IconCopy,
 	IconEdit,
+	IconPencil,
 	IconPin,
 	IconRedo,
 	IconRefresh,
@@ -879,6 +880,18 @@ export function Bubble({
 		<div
 			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""}`}
 		>
+			{/* 导演备注（PLAN-DIRECTOR-NOTE）：本条回复生成时随行的戏外指示——只作显示，
+			   渲染成用户气泡下的小气泡；模型看不见，切变体时跟着变（记录在变体上）。 */}
+			{!isUser && !editing && msg.notes && msg.notes.length > 0 && (
+				<div className="msg-notes">
+					{msg.notes.map((n, i) => (
+						<div key={i} className="msg-note" title={t("备注：生成这一拍时随行的戏外指示，不进入剧情历史")}>
+							<IconPencil size={11} />
+							<span className="msg-note-text">{n}</span>
+						</div>
+					))}
+				</div>
+			)}
 			{!stage && (
 				<div className="msg-head">
 					<MsgAvatar src={avatarUrl} name={name} kind={isUser ? "user" : "char"} />

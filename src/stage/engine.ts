@@ -601,7 +601,7 @@ export const mergeFinalText = (draft: string, text: string): string => {
 export class StageEngine {
 	#deps: StageEngineDeps;
 	#busy = false;
-	#queue: Array<{ text: string; mode: ConversationMode }> = [];
+	#queue: Array<{ text: string; mode: ConversationMode; note?: string }> = [];
 	#abort: AbortController | null = null;
 	#warnedMacros = "";
 	#warnedAuditDrop = 0;
@@ -730,20 +730,23 @@ export class StageEngine {
 		return this.#busy;
 	}
 
-	/** 用户新输入开一拍：先落 user 消息再开演；忙时排队（流式中送达的输入不打断叙事） */
-	async performTurn(userText: string): Promise<void> {
+	/**
+	 * 用户新输入开一拍：先落 user 消息再开演；忙时排队（流式中送达的输入不打断叙事）。
+	 * directorNote＝导演备注（PLAN-DIRECTOR-NOTE）：戏外当拍指示，只进本拍装配、不落树，用完即焚。
+	 */
+	async performTurn(userText: string, directorNote?: string): Promise<void> {
 		if (this.#busy) {
-			this.#queue.push({ text: userText, mode: this.mode });
+			this.#queue.push({ text: userText, mode: this.mode, ...(directorNote ? { note: directorNote } : {}) });
 			return;
 		}
-		await this.#run(userText);
+		await this.#run(userText, this.mode, directorNote);
 		await this.#drain();
 	}
 
-	/** 再生成：叶已钉在 user（swipe/reroll 已 branch），不追加 user 消息直接开演 */
-	async regenerate(): Promise<void> {
+	/** 再生成：叶已钉在 user（swipe/reroll 已 branch），不追加 user 消息直接开演；directorNote 同 performTurn */
+	async regenerate(directorNote?: string): Promise<void> {
 		if (this.#busy) return;
-		await this.#run(null);
+		await this.#run(null, this.mode, directorNote);
 		await this.#drain();
 	}
 
@@ -756,11 +759,11 @@ export class StageEngine {
 	async #drain(): Promise<void> {
 		while (this.#queue.length > 0 && !this.#busy) {
 			const next = this.#queue.shift();
-			if (next !== undefined) await this.#run(next.text, next.mode);
+			if (next !== undefined) await this.#run(next.text, next.mode, next.note);
 		}
 	}
 
-	async #run(userText: string | null, requestedMode = this.mode): Promise<void> {
+	async #run(userText: string | null, requestedMode = this.mode, directorNote?: string): Promise<void> {
 		const ev = this.#deps.events ?? {};
 		if (requestedMode !== this.mode) this.setMode(requestedMode);
 		this.#busy = true;
@@ -771,7 +774,7 @@ export class StageEngine {
 		ev.onTurnStart?.();
 		let endInfo: StageTurnEndInfo = { aborted: false };
 		try {
-			endInfo = await this.#turn(userText);
+			endInfo = await this.#turn(userText, directorNote);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			ev.onNotify?.("error", `本拍开演失败：${msg}`);
@@ -785,7 +788,7 @@ export class StageEngine {
 		}
 	}
 
-	async #turn(userText: string | null): Promise<StageTurnEndInfo> {
+	async #turn(userText: string | null, directorNote?: string): Promise<StageTurnEndInfo> {
 		const { cwd, events: rawEv = {} } = this.#deps;
 		const session = this.#deps.getSession();
 		const sm = session.sessionManager;
@@ -993,6 +996,8 @@ export class StageEngine {
 			...(memoryRecall ? { memoryRecall } : {}),
 			// off 挡（无原生思考通道、不主动检索）：绿灯命中给正文兜底；其余档位给标题让模型自取。
 			passiveLore: (this.#deps.getThinking?.() ?? "off") === "off",
+			// 导演备注（PLAN-DIRECTOR-NOTE）：本拍瞬时指示，不落树；无备注时与既有装配逐字相同。
+			...(directorNote?.trim() ? { directorNote } : {}),
 		});
 
 		// 第二步·跨会话记忆（读侧）：卡的常驻摘要与这局的前情共用【前情提要】槽位——
@@ -1218,8 +1223,13 @@ export class StageEngine {
 					final.details && typeof final.details === "object" && !Array.isArray(final.details)
 						? (final.details as Record<string, unknown>)
 						: undefined;
+				// 导演备注（PLAN-DIRECTOR-NOTE）：随这一拍生成出的回复记一份**只作显示**的记录
+				// （与 rpChoices 同一条 details 通道）——模型看不见、不进装配/历史，仅供前端在
+				// 用户气泡下渲染备注小气泡；切变体时跟着变（记在变体上）。
+				const noteLines = directorNote?.split("\n").map((s) => s.trim()).filter(Boolean) ?? [];
 				const details = { ...prevDetails, rpTimeline: timeline, rpDraft: { id: ws.id, version: ws.version, phase: ws.phase },
-					...(ws.choices?.length ? { rpChoices: ws.choices } : {}) };
+					...(ws.choices?.length ? { rpChoices: ws.choices } : {}),
+					...(noteLines.length ? { rpNotes: noteLines } : {}) };
 				entryId = session.appendMessage({
 					...final,
 					...(ws.sealed ? { stopReason: "stop" } : {}),

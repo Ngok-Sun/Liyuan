@@ -144,6 +144,11 @@ export interface WireMsg {
 	checkpoint?: WireCheckpoint;
 	/** compaction 通道专用：这次压缩覆盖了什么、摘要全文 */
 	compaction?: WireCompaction;
+	/**
+	 * 导演备注（PLAN-DIRECTOR-NOTE）：本拍生成时随行的戏外指示（引擎经 details.rpNotes 落树）。
+	 * 只作显示——前端在用户气泡下渲染备注小气泡；不进装配、不进历史，模型看不见。
+	 */
+	notes?: string[];
 }
 
 /** 压缩记录（对话流内联卡片）：kind 决定单位（轮/章），summary 是摘要全文（可展开读） */
@@ -584,12 +589,19 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 							: seg,
 					)
 				: undefined;
+		// 导演备注（只作显示）：本条回复生成时随行的备注，前端在用户气泡下渲染小气泡
+		const rpNotes = (msg.details as { rpNotes?: unknown } | undefined)?.rpNotes;
+		const notes =
+			Array.isArray(rpNotes)
+				? rpNotes.filter((n): n is string => typeof n === "string" && n.trim().length > 0)
+				: undefined;
 		return {
 			channel,
 			name: names.charName,
 			text: body,
 			...(thinking ? { thinking } : {}),
 			...(timeline ? { timeline } : {}),
+			...(notes && notes.length > 0 ? { notes } : {}),
 			...(aborted ? { unfinished: true } : {}),
 		};
 	}

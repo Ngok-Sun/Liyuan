@@ -40,6 +40,13 @@ export const RP_COMMANDS: CommandMeta[] = [
 		mode: "roleplay",
 	},
 	{
+		name: "note",
+		usage: "/note [导演备注]",
+		description: "导演备注：写一句戏外指示，影响下一拍的演出或重 roll；不进入剧情历史（无参清除）",
+		takesArgs: true,
+		mode: "roleplay",
+	},
+	{
 		name: "swipe",
 		usage: "/swipe [prev|next|new]",
 		description: "切换回复变体（prev/next；在末条 next=再生成；new=强制再生成）。不产生世界线",

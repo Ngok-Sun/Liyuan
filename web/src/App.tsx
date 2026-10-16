@@ -61,6 +61,7 @@ import {
 	IconClose,
 	IconDock,
 	IconEdit,
+	IconPencil,
 	IconLorebook,
 	IconNewChat,
 	IconPanelLeft,
@@ -336,6 +337,11 @@ export default function App() {
 	);
 	/** 手机端输入框左侧工具收纳：展开成上方一行（桌面端按钮常驻，此态无效） */
 	const [composerTools, setComposerTools] = useState(false);
+	/**
+	 * 备注行（PLAN-DIRECTOR-NOTE）：点「备注」加一行，可多条。发送/重 roll/重抽时随行——
+	 * 前端先发 `/note`（多条＝一个命令多行）再发动作；不进入剧情历史，用完即清。
+	 */
+	const [noteRows, setNoteRows] = useState<string[]>([]);
 	const [sessions, setSessions] = useState<WireSessionInfo[] | null>(null);
 	/** 两层布局的子项目清单（null＝老布局/未下发 ⇒ 面板回落扁平列表） */
 	const [chats, setChats] = useState<WireChatInfo[] | null>(null);
@@ -1323,6 +1329,20 @@ export default function App() {
 		}
 	}, [busy, storyCheckpoints, ws]);
 
+	/**
+	 * 备注行 → 先发 `/note` 武装（多条＝一个命令内多行；服务端按「下一次扮演生成」消费：
+	 * 发送/重 roll/重抽都算）。无备注行、或非扮演模式时什么都不发，视为成功。
+	 * 返回 false＝连接未就绪，调用方应中止本次动作。
+	 */
+	const sendNotes = useCallback((): boolean => {
+		if (conversationMode !== "roleplay") return true;
+		const lines = noteRows.map((s) => s.trim()).filter(Boolean);
+		if (lines.length === 0) return true;
+		if (!ws.send({ type: "prompt", text: `/note ${lines.join("\n")}` })) return false;
+		setNoteRows([]);
+		return true;
+	}, [conversationMode, noteRows, ws]);
+
 	const send = useCallback(() => {
 		const typed = input.trim();
 		// 附件随消息：路径清单作为尾行附在正文后（这一行即持久记录，重放同路径解析）
@@ -1375,6 +1395,11 @@ export default function App() {
 				? ws.send({ type: "compact" })
 				: ws.send({ type: "prompt", text: typed });
 		} else {
+			// 备注随下一次生成走：先发 /note 再发正文（同一 WS 保序）；命令（/rewind 等）不带走备注
+			if (!typed.startsWith("/") && !sendNotes()) {
+				pushToast("warning", t("连接还没好，内容还在输入框里"));
+				return;
+			}
 			sent = ws.send({ type: "prompt", text });
 		}
 		if (!sent) {
@@ -1389,7 +1414,7 @@ export default function App() {
 		atBottomRef.current = true;
 		setAtBottom(true);
 		if (inputRef.current) inputRef.current.style.height = "auto";
-	}, [input, pending, ws, openStoreModal, pushToast, toggleRight, conversationMode, saveAgentCheckpoint, rewindAgentTurn]);
+	}, [input, pending, ws, openStoreModal, pushToast, toggleRight, conversationMode, saveAgentCheckpoint, rewindAgentTurn, sendNotes]);
 
 
 	// 卡 HTML（如 某卡 开场表单）调用 triggerSlash(`/send …|/trigger`)
@@ -1499,10 +1524,19 @@ export default function App() {
 			const attachLine =
 				attachments.length > 0 ? buildAttachmentLine(attachments.map((a) => a.file)) : "";
 			const full = attachLine ? `${text}\n${attachLine}` : text;
+			// 改写输入后重 roll：备注同样随行（先 /note 再 /reroll）
+			if (!sendNotes()) {
+				pushToast("warning", t("连接还没好，改写还在编辑框里"));
+				return;
+			}
 			sent = ws.send({ type: "reroll", text: full });
 		} else {
 			const orig = (messages[msgEdit.idx]?.text ?? "").trim();
 			if (text === orig && msgEdit.kind === "narrative") {
+				if (!sendNotes()) {
+					pushToast("warning", t("连接还没好，改写还在编辑框里"));
+					return;
+				}
 				sent = ws.send({ type: "reroll" });
 			} else {
 				sent = ws.send({ type: "prompt", text: `/editreply ${text}` });
@@ -1513,7 +1547,7 @@ export default function App() {
 			return;
 		}
 		setMsgEdit(null);
-	}, [msgEdit, busy, messages, ws, pushToast]);
+	}, [msgEdit, busy, messages, ws, pushToast, sendNotes]);
 
 	/** 回退到某条用户消息之前（含该条）：N = 从该条到末尾的剧情用户轮数 */
 	const rewindToUser = useCallback(
@@ -2519,7 +2553,7 @@ export default function App() {
 												onReroll={
 													!busy && !msgEdit
 														? b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
-															? () => { ws.send({ type: "swipe", dir: "new" }); }
+															? () => { if (sendNotes()) ws.send({ type: "swipe", dir: "new" }); }
 															: isAgentMode && b.msg.channel === "authoring" && b.idx === lastNarrativeIdx
 																? () => { ws.send({ type: "reroll" }); }
 																: undefined
@@ -2814,6 +2848,39 @@ export default function App() {
 									{argHint.usage} — {argHint.description}
 								</div>
 							)}
+							{/* 备注行（PLAN-DIRECTOR-NOTE）：点「备注」加一行；flex-wrap 下占满一行、排在输入行上方。
+							   发送/重 roll/重抽时随行（先 /note 再动作），不进入剧情历史。 */}
+							{conversationMode === "roleplay" && noteRows.length > 0 && (
+								<div className="note-rows">
+									{noteRows.map((row, i) => (
+										<div className="note-row" key={i}>
+											<IconPencil size={13} />
+											<input
+												className="note-input"
+												value={row}
+												placeholder={t("备注：只影响下一拍演出或重 roll，不进入剧情历史")}
+												autoFocus={i === noteRows.length - 1}
+												onChange={(e) => setNoteRows((rs) => rs.map((r, j) => (j === i ? e.target.value : r)))}
+												onKeyDown={(e) => {
+													if (!coarse && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+														e.preventDefault();
+														send();
+													}
+												}}
+											/>
+											<button
+												type="button"
+												className="note-x"
+												title={t("删除这条备注")}
+												aria-label={t("删除这条备注")}
+												onClick={() => setNoteRows((rs) => rs.filter((_, j) => j !== i))}
+											>
+												<IconClose size={12} />
+											</button>
+										</div>
+									))}
+								</div>
+							)}
 							{/* 手机端：左侧三钮收进「＋」，展开为输入框上方一行；桌面端 CSS 隐藏此钮、工具常驻 */}
 							<button
 								type="button"
@@ -2896,6 +2963,19 @@ export default function App() {
 										>
 											<IconRoster size={18} />
 											<span className="composer-tool-label">{t("名录")}</span>
+										</button>
+										<button
+											type="button"
+											className="dock-btn"
+											title={t("加一行备注：只影响下一拍演出或重 roll，不进入剧情历史")}
+											aria-label={t("加一行备注")}
+											onClick={() => {
+												setNoteRows((rs) => [...rs, ""]);
+												setComposerTools(false);
+											}}
+										>
+											<IconPencil size={18} />
+											<span className="composer-tool-label">{t("备注")}</span>
 										</button>
 										<button
 											type="button"

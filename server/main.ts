@@ -759,6 +759,21 @@ const extractEntryText = (content: unknown): string => {
  */
 let rerollFallbackLeaf: string | null = null;
 
+/**
+ * 导演备注（PLAN-DIRECTOR-NOTE）：戏外当拍指示的「待生效」暂存。不落盘、不进树——
+ * 被下一拍扮演生成消费即焚（普通发送/重 roll 都算）；工作/agent 轮不消费。
+ * 入口：`/note <文本>` 武装、`/note` 清除；CLI 与 Web 共用这一条通道。
+ */
+let pendingDirectorNote: string | null = null;
+
+/** 取走待生效的导演备注（一次性；仅扮演轮消费——工作/agent 轮不动它） */
+const takeDirectorNote = (): string | undefined => {
+	if (stage?.mode !== "roleplay") return undefined;
+	const note = pendingDirectorNote;
+	pendingDirectorNote = null;
+	return note ?? undefined;
+};
+
 /** 当前分支上最后一条用户消息 entry id（agent 模式查全部分支 user；roleplay 模式查剧情轮） */
 const lastStoryUserId = (): string | null => {
 	const isAgent = stage?.mode === "agent";
@@ -1140,7 +1155,7 @@ const regenerateSwipe = async (): Promise<void> => {
 	}
 	// 展示层立刻去掉旧回复（只显示到 user）
 	resyncAll();
-	await stage.regenerate();
+	await stage.regenerate(takeDirectorNote());
 };
 
 /**
@@ -1536,6 +1551,8 @@ const syncMemoryForSession = () => {
 
 const bindSession = async () => {
 	session = runtime.session;
+	// 换会话/换子项目/新建/回档重挂——凡重绑必到：待生效的导演备注不带过去（PLAN-DIRECTOR-NOTE）
+	pendingDirectorNote = null;
 	// 账本/面板的落点跟着会话走（子项目一份）：换会话/换子项目后要重挂目录监听
 	stateWatcher.rearm();
 	panelsWatcher.rearm();
@@ -3056,6 +3073,23 @@ const hostCompact = async (): Promise<void> => {
 /** 发送用户输入（含斜杠命令；命令后全量对齐所有端） */
 const handlePrompt = async (text: string) => {
 	const trimmed = text.trim();
+	// 导演备注（PLAN-DIRECTOR-NOTE）：戏外当拍指示的武装/清除。不落树、不进历史——
+	// 被下一拍扮演生成消费即焚。CLI 与 Web 共用这一条通道（Web 端 UI 随后接）。
+	const noteMatch = /^\/note(?:[ \t]+([\s\S]*))?$/i.exec(trimmed);
+	if (noteMatch) {
+		if (stage?.mode === "agent") {
+			broadcast({ type: "notify", level: "warning", text: t("导演备注仅扮演模式可用") });
+			return;
+		}
+		const note = (noteMatch[1] ?? "").trim();
+		pendingDirectorNote = note || null;
+		broadcast({
+			type: "notify",
+			level: "info",
+			text: note ? t("导演备注已就位，将影响下一拍：{note}", { note }) : t("已清除导演备注"),
+		});
+		return;
+	}
 	// ST 式变体：无参 /reroll 与 /swipe 由宿主处理（需重开一拍，扩展命令上下文无此能力）
 	if (/^\/reroll\s*$/i.test(trimmed)) {
 		if (storyStreaming()) {
@@ -3097,7 +3131,7 @@ const handlePrompt = async (text: string) => {
 		session.appendMessage({ role: "user", content: [{ type: "text", text: rerollArgMatch[1].trim() }], timestamp: Date.now() });
 		sm.flush();
 		resyncAll();
-		await stage.regenerate();
+		await stage.regenerate(takeDirectorNote());
 		return;
 	}
 	// 开场白切换：宿主层处理，保证「同一条替换」而非叠楼
@@ -3211,7 +3245,7 @@ const handlePrompt = async (text: string) => {
 			message: { channel: "user", name: names.userName, text: trimmed, ...(stage.mode !== "roleplay" ? { mode: stage.mode } : {}) },
 		});
 		// 流式中送达的输入由引擎排队到本拍结束（RP 语境：不打断正在进行的叙事）
-		await stage.performTurn(trimmed);
+		await stage.performTurn(trimmed, takeDirectorNote());
 		return;
 	}
 	await session.prompt(trimmed, session.isStreaming ? { streamingBehavior: "followUp" } : undefined);
