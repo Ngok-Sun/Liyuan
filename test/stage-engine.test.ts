@@ -411,6 +411,37 @@ test("引擎压缩：compactNow() 手动压缩不等周期；流式中拒绝", a
 	}
 });
 
+test("扮演压缩：拍压缩后指示器折算——contextUsage 刷新为压缩后的值（小于 pi 的压缩前值）", async () => {
+	const { cwd, sm } = makeStage();
+	setCompactEvery(cwd, 0); // 自动压缩关闭，只测手动压缩后的折算
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const responses: unknown[] = [];
+		for (let i = 1; i <= 8; i++) {
+			responses.push(fauxAssistantMessage(`第 ${i} 拍的正文。${"云".repeat(1200)}`));
+			responses.push(fauxScribeEmpty());
+		}
+		reg.setResponses(responses as never);
+		const engine = await makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		for (let i = 1; i <= 8; i++) await engine.performTurn(`第 ${i} 拍我说的话。`);
+
+		assert.equal(engine.contextUsage(), undefined, "未压缩时不给折算值——指示器用 pi 的实测占用");
+
+		reg.setResponses([fauxAssistantMessage("## 前情提要\n手动压缩产出的摘要。")]);
+		const r = await engine.compactNow();
+		assert.equal(r.kind, "compacted");
+
+		const folded = engine.contextUsage();
+		assert.ok(folded, "拍压缩后指示器应给出折算值（否则右下角停在压缩前）");
+		const piTokens = sessionByEngine.get(engine)!.getSessionStats().contextUsage?.tokens ?? 0;
+		assert.ok(folded!.tokens > 0, "折算值为正");
+		assert.ok(folded!.tokens < piTokens, `折算后 ${folded!.tokens} 应小于压缩前真实占用 ${piTokens}`);
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 
 
 

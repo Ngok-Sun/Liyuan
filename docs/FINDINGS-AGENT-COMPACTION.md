@@ -66,3 +66,32 @@
 - **扮演模式**：刀 3 的折算只覆盖 agent 讨论压缩；扮演的拍压缩（rp-summary）压完同样只等下一拍才更新（pi 数不变），本轮未动。
 - **长局**：连续 20+ 拍、压缩与 swipe/rewind/切线并发、压缩中切模型，均未测。
 - **CLI**：`onCompaction` 是可选 dep，CLI 只打一行 `[compaction]` 日志，未做终端进度。
+
+---
+
+## 五 扮演侧补齐（2026-10-16 追加）
+
+用户问「扮演模式下是否仍存在那三个问题」。**逐条查证：两条已被刀 4 覆盖，只剩一条。**
+
+| 用户报的 | 扮演下的实情 | 依据 |
+|---|---|---|
+| ①压缩没有进度 | **已覆盖**。`runCompaction` 对扮演拍压缩同样发 `onCompaction`（`kind:"story"`），前端不看 kind、通用处理 | `compact.ts:240/251/263/287`、`engine.ts:1753`、`server/main.ts:2937`、`web/App.tsx:1077` |
+| ②上下文计算不会刷新 | **未覆盖 → 本次修**。`#ctxOverride` 只设在 `#compactDiscussion`（讨论层），扮演的 `#compact` 不设 | `engine.ts`（原 1713 只在讨论侧） |
+| ③看不到压缩后的那份摘要 | **已覆盖**。投影层同时认 `rp-summary` 与 `liyuan-discussion-summary`，卡片按 kind 出「前情提要」 | `server/main.ts:876`、`server/wire.ts:630`、`web/Messages.tsx:722` |
+
+**②的修法**（与讨论层同一条折算，只是换了装配来源）：
+
+- `compact.ts` 加 `historyTokens(branch)`——`rebuildHistory` 装配后送模历史的估算占用（字符/4）。
+- `discussion.ts` 把「取最近一次真实占用」抽成 `promptTokensOfMessages(messages)`，`livePromptTokens` 与扮演侧共用。
+- `engine.ts#compact`：扮演拍压缩成功且非文件模式、非工作/agent 轮时，
+  `#ctxOverride = real × estAfter/estBefore`（`real = promptTokensOfMessages(authoringHistory(branch))`）。
+- **守卫 `lastUserMode`**：工作/agent 轮的装配（`authoringHistory`/`agentHistory`）**不吃 rp-summary**，
+  那种情况下折算就是错值——只对扮演上下文（最后一条 user 消息无 `liyuanMode`）折算。
+
+**验证**：`test/agent-mode.test.ts` 一条（`historyTokens` 压缩后变小）；
+`test/stage-engine.test.ts` 一条（8 拍后 `compactNow()`，`contextUsage()` 出现折算值且 < pi 的压缩前值）。
+全量 855 项 853 过（仍 2 项既有实卡红：cardfront-pipeline、mvu）。
+
+**未做**：真浏览器端到端（扮演压缩后状态栏数字刷新）。UI 路径与讨论侧折算完全同源（同一 `#ctxOverride`
+→ `contextUsage()` → `safeStats` → `StatusStrip`），讨论侧已在浏览器验过，本轮只在引擎层测。
+

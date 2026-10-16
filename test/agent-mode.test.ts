@@ -11,7 +11,7 @@ import { listCardMemory } from "../src/card-memory-tools.ts";
 import { harnessManagedPath, sandboxScope, sandboxVerdict } from "../src/sandbox.ts";
 import { buildAgentStateBlock } from "../src/stage/agent.ts";
 import { SUMMARY_ENTRY_TYPE, type BranchEntryLike } from "../src/stage/assemble.ts";
-import { planCompaction } from "../src/stage/compact.ts";
+import { historyTokens, planCompaction } from "../src/stage/compact.ts";
 import { agentHistory, DISCUSSION_SUMMARY_TYPE, planDiscussionCompaction, serializeDiscussion } from "../src/stage/discussion.ts";
 import { prependToLastUser } from "../src/stage/engine.ts";
 import { listStoryFiles, storyDirectory } from "../src/stage/story-history.ts";
@@ -90,6 +90,24 @@ test("手动压缩：force 不等阈值；可压部分低于地板则不压", ()
 		null,
 		"可压部分不足地板：不烧旁路调用",
 	);
+});
+
+test("扮演历史估算：rp-summary 覆盖早期条目后估算占用变小——扮演压缩折算指示器的尺子", () => {
+	const beat = (n: number) =>
+		[
+			{ id: `u${n}`, type: "message", message: { role: "user", content: [{ type: "text", text: `第 ${n} 拍我说的话。` }] } },
+			{ id: `a${n}`, type: "message", message: { role: "assistant", content: [{ type: "text", text: `第 ${n} 拍的正文。${"云".repeat(2000)}` }] } },
+		] as BranchEntryLike[];
+	const branch = [...beat(1), ...beat(2), ...beat(3), ...beat(4), ...beat(5), ...beat(6)];
+	const before = historyTokens(branch);
+	assert.ok(before > 0);
+	// rp-summary 覆盖前四拍，摘要很短——压缩后装配进上下文的历史应显著变短
+	const after = [
+		...branch,
+		{ id: "s1", type: "custom", customType: SUMMARY_ENTRY_TYPE, data: { summary: "前四拍的接力摘要。", coversThroughId: "a4" } } as BranchEntryLike,
+	];
+	const post = historyTokens(after);
+	assert.ok(post < before, `压缩后 ${post} 应小于压缩前 ${before}`);
 });
 
 test("前情压缩按文件：保留最后 N 个文件、跳过已覆盖、按字数到期；摘要条目记 coveredFiles", () => {

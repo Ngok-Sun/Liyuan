@@ -58,14 +58,14 @@ export function discussionTokens(branch: ConversationEntry[]): number {
 }
 
 /**
- * 讨论的真实占用：最近一条带 usage 的 assistant 的 prompt 侧 token，其后消息用估算补齐
+ * 从「送模消息流」取最近一次真实占用：最近一条带 usage 的 assistant 的 prompt 侧 token，其后消息用估算补齐
  * （与 pi estimateContextTokens 同法）。判据必须用它——估算尺子（字符/4）对中文低估近一倍，
  * 只看估算，「窗口 − 预留」这个阈值会落在真实溢出之后，压缩永远不触发（2026-10-16 实测坐实：
  * 讨论估算 28 万 token 时真实 prompt 已到 54.9 万，一次没压过）。
+ * 讨论压缩与扮演压缩共用——两者的消息流来源不同（讨论走 authoringHistory(liveDiscussion)，扮演走
+ * authoringHistory(branch)），但取用量的方法是同一条。
  */
-export function livePromptTokens(branch: ConversationEntry[]): number | null {
-	const { live } = liveDiscussion(branch);
-	const messages = authoringHistory(live);
+export function promptTokensOfMessages(messages: ContextMessage[]): number | null {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i]!;
 		if (m.role !== "assistant") continue;
@@ -80,6 +80,11 @@ export function livePromptTokens(branch: ConversationEntry[]): number | null {
 		return tokens + trailing;
 	}
 	return null;
+}
+
+export function livePromptTokens(branch: ConversationEntry[]): number | null {
+	const { live } = liveDiscussion(branch);
+	return promptTokensOfMessages(authoringHistory(live));
 }
 
 const latestSummary = (branch: ConversationEntry[]): { at: number; data: DiscussionSummaryData } | null => {

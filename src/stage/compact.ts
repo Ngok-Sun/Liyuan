@@ -95,6 +95,20 @@ export function serializeForSummary(entries: BranchEntryLike[], userName: string
 }
 
 /**
+ * 装配后送模历史的估算占用（字符/4，与讨论侧 discussionTokens 同一把尺）。
+ * 扮演拍压缩后折算指示器用：压缩前/后各取一次，比值 × 最近一次真实占用 = 压缩后的上下文占用
+ * （压的是装配，不改 pi 的消息列表，不算这一笔右下角会一直停在压缩前）。
+ * 不传 promptRules——比值只要前后同尺，作者正则对比值无影响。
+ */
+export function historyTokens(branch: BranchEntryLike[]): number {
+	const { history, summary } = rebuildHistory(branch);
+	let n = 0;
+	for (const m of history) n += Math.ceil(m.text.length / 4);
+	if (summary) n += Math.ceil(summary.length / 4);
+	return n;
+}
+
+/**
  * 压缩判定 + 切点计算（纯函数）。
  * 触发条件：分支上「活着的」叙事拍数 ≥ 保留拍数 + 周期，且可裁正文够长。
  * 返回 null = 本拍不压缩。

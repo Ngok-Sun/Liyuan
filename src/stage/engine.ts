@@ -18,7 +18,7 @@ import { authoringHistory, authoringRequestIds, contextText, conversationMode, C
 import { authoringTools, authoringSystemPrompt, runAuthoringTool, AUTHORING_NATIVE_TOOLS, CONVERSATION_MODE_TOOL } from "./authoring.ts";
 import { AGENT_ASK_TOOL, AGENT_SCREENSHOT_TOOL, agentSystemPrompt, buildAgentStateBlock } from "./agent.ts";
 import { describeChange, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type ChangeSet } from "./story-history.ts";
-import { agentHistory, buildDiscussionSummaryPrompt, discussionTokens, DISCUSSION_SUMMARY_TYPE, livePromptTokens, MANUAL_MIN_DISCUSSION_TOKENS, planDiscussionCompaction } from "./discussion.ts";
+import { agentHistory, buildDiscussionSummaryPrompt, discussionTokens, DISCUSSION_SUMMARY_TYPE, livePromptTokens, MANUAL_MIN_DISCUSSION_TOKENS, planDiscussionCompaction, promptTokensOfMessages } from "./discussion.ts";
 import { readFileSync } from "node:fs";
 import { createSandboxGate, sandboxGrantsFromBranch, SANDBOX_GRANT_TYPE } from "../sandbox.ts";
 import { fileChangeOf } from "../activity-format.ts";
@@ -60,6 +60,7 @@ import {
 } from "./materials.ts";
 import {
 	MANUAL_MIN_COMPACT_CHARS,
+	historyTokens,
 	runCompaction,
 	SUMMARY_ENTRY_TYPE,
 	type CompactOutcome,
@@ -429,6 +430,22 @@ export const prependToLastUser = (history: ContextMessage[], block: string): voi
 		} else m.content = [{ type: "text", text: block }];
 		return;
 	}
+};
+
+/**
+ * 分支上最后一条用户消息的模式标记（引擎自己写的 details.liyuanMode）。扮演不写 = undefined，
+ * 工作轮写 "authoring"、agent 轮写 "agent"。扮演压缩的指示器折算只对扮演上下文成立——工作/agent
+ * 轮的装配（authoringHistory/agentHistory）不吃 rp-summary，折算了也是错值。
+ */
+const lastUserMode = (branch: BranchEntryLike[]): unknown => {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const e = branch[i]!;
+		if (e.type !== "message") continue;
+		const m = e.message as { role?: string; details?: { liyuanMode?: unknown } } | undefined;
+		if (m?.role !== "user") continue;
+		return m.details?.liyuanMode;
+	}
+	return undefined;
 };
 
 /**
@@ -1766,6 +1783,18 @@ export class StageEngine {
 			);
 			if (c.kind === "failed") console.error(`[stage-compact] 压缩跳过：${c.error}`);
 			if (c.kind === "compacted") sm.flush();
+			// 指示器折算（扮演拍压缩）：压缩改的是装配，不改 pi 的消息列表——不算这一笔，
+			// 右下角会一直停在压缩前，直到下一拍真实 usage 落地。与讨论压缩同法（#compactDiscussion）。
+			// agent 文件压缩压的是正文文件、不动上下文；工作/agent 轮的装配不吃 rp-summary——两者都不折算。
+			if (c.kind === "compacted" && agentStoryDir === undefined && lastUserMode(branch) === undefined) {
+				const after = sm.getBranch() as BranchEntryLike[];
+				const estBefore = historyTokens(branch);
+				const estAfter = historyTokens(after);
+				const real = promptTokensOfMessages(authoringHistory(branch));
+				if (real && estBefore > 0 && estAfter < estBefore) {
+					this.#ctxOverride = { sessionId: sm.getSessionId(), tokens: Math.max(1, Math.round(real * (estAfter / estBefore))) };
+				}
+			}
 			return c;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
