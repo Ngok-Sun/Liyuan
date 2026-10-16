@@ -362,6 +362,14 @@ export function seedStageSystemPrompt(cwd: string, agentDir: string): void {
 			copyFileSync(shipped("AGENT_APPEND_SYSTEM.md"), agentAppendTarget);
 			lastAgentMergeLog.push(`已播种 agent 模式定义默认值 AGENT_APPEND_SYSTEM.md → ${agentAppendTarget}`);
 		}
+
+		// 副编剧默认人设（PLAN-COMPANION-BOT）：与 APPEND_SYSTEM.md 同一规则，缺失才播种；
+		// 卡级 BOT.md 覆盖它，都缺时退随包 assets/BOT.md
+		const botPersonaTarget = join(agentDir, "BOT.md");
+		if (!existsSync(botPersonaTarget) && existsSync(shipped("BOT.md"))) {
+			copyFileSync(shipped("BOT.md"), botPersonaTarget);
+			lastAgentMergeLog.push(`已播种副编剧默认人设 BOT.md → ${botPersonaTarget}`);
+		}
 	} catch (err) {
 		console.error(`[liyuan] 播种提示词槽位失败：${err instanceof Error ? err.message : String(err)}`);
 	}

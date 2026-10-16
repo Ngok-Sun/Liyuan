@@ -17,6 +17,21 @@ import { projectToolContext } from "./context.ts";
 import { authoringHistory, authoringRequestIds, contextText, conversationMode, CONVERSATION_MODE_TYPE, CONVERSATION_PROCESS_TYPE, isConversationMode, roleplayHistory, type ConversationMode, type ContextMessage } from "../conversation-mode.ts";
 import { authoringTools, authoringSystemPrompt, runAuthoringTool, AUTHORING_NATIVE_TOOLS, CONVERSATION_MODE_TOOL } from "./authoring.ts";
 import { AGENT_ASK_TOOL, AGENT_SCREENSHOT_TOOL, agentSystemPrompt, buildAgentStateBlock } from "./agent.ts";
+import {
+	BOT_THREAD_REPLAY,
+	appendBotThread,
+	beatsOf,
+	botThreadPath,
+	botTools,
+	buildBotSystemPrompt,
+	buildBotView,
+	readBotPersona,
+	readBotThread,
+	runBotLoop,
+	runBotTool,
+	type BotStreamFn,
+} from "./bot.ts";
+import { rulesAgentDir } from "../user-rules.ts";
 import { describeChange, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type ChangeSet } from "./story-history.ts";
 import { agentHistory, buildDiscussionSummaryPrompt, discussionTokens, DISCUSSION_SUMMARY_TYPE, livePromptTokens, MANUAL_MIN_DISCUSSION_TOKENS, planDiscussionCompaction, promptTokensOfMessages } from "./discussion.ts";
 import { readFileSync } from "node:fs";
@@ -603,6 +618,8 @@ export class StageEngine {
 	#busy = false;
 	#queue: Array<{ text: string; mode: ConversationMode; note?: string }> = [];
 	#abort: AbortController | null = null;
+	/** 副编剧轮的独立中止（与台前各管各的；两者靠同一把 #busy 串行，互不打断） */
+	#botAbort: AbortController | null = null;
 	#warnedMacros = "";
 	#warnedAuditDrop = 0;
 	#warnedProtocolDrop = "";
@@ -753,7 +770,79 @@ export class StageEngine {
 	/** 强制停止本拍：已流出的部分正文仍落树可见 */
 	abort(): void {
 		this.#abort?.abort();
+		this.#botAbort?.abort();
 		void this.#deps.getSession().abort();
+	}
+
+	/**
+	 * 幕后副编剧的一轮（docs/PLAN-COMPANION-BOT.md 刀 1）：与台前完全隔离的第二个线程。
+	 * 送模内容＝闭合集合（见 bot.ts 文件头）：卡级 APPEND_SYSTEM.md＋BOT.md＋每轮视野块＋线程＋工具回执。
+	 * 线程落 <子项目>/副编剧.jsonl——不进会话树、不进场记/摘要/记忆/压缩；主 agent 不知道它存在。
+	 * 与台前串行（同一把 #busy）；模型默认跟主演条目（既有注入，不新增链路）。
+	 */
+	async botTurn(
+		text: string,
+		o: { onDelta?: (kind: "text" | "thinking", delta: string) => void; onActivity?: (detail: string) => void } = {},
+	): Promise<{ text: string } | { error: string }> {
+		if (this.#busy) return { error: "台前正在生成——等这一拍结束（或先停止），再唤副编剧。" };
+		const model = this.#deps.getModel();
+		if (!model) return { error: "尚未配置剧情模型。" };
+		const trimmed = text.trim();
+		if (!trimmed) return { error: "说点什么再唤副编剧。" };
+		this.#busy = true;
+		const ac = new AbortController();
+		this.#botAbort = ac;
+		try {
+			const cwd = this.#deps.cwd;
+			const sm = this.#deps.getSession().sessionManager;
+			const materials = loadStageMaterials(cwd);
+			const chatDir = chatDirOfSessionDir(sm.getSessionDir?.());
+			const cardDir = chatDir ? cardDirOfChatDir(chatDir) : null;
+			const macro = { charName: materials.card.name, userName: materials.config.userName };
+			const systemPrompt = buildBotSystemPrompt({
+				cardAppend: materials.userRules.card,
+				persona: readBotPersona(cardDir, rulesAgentDir()),
+				macro,
+			});
+			const branch = sm.getBranch() as BranchEntryLike[];
+			const rebuilt = rebuildHistory(branch, materials.promptRules);
+			const beats = beatsOf(rebuilt.history);
+			const view = buildBotView({ summary: rebuilt.summary, state: formatState(stateFromBranch(branch)), beats });
+			const file = botThreadPath(cwd, sm.getSessionDir?.(), sm.getSessionId());
+			const thread = readBotThread(file).slice(-BOT_THREAD_REPLAY);
+			// 卡族依赖＝读侧 ∪ 宿主 authoring 件（与工作模式/agent 模式同一条并法：
+			// card_create/card_project 等只在 authoring 件里，缺了它们工具不上清单）
+			const deps: StageToolDeps = { ...this.#toolDeps(), ...this.#deps.authoring };
+			const tools = botTools(materials.config.language, deps);
+			const { apiKey, headers } = await this.#deps.getAuth(model);
+			const r = await runBotLoop({
+				stream: this.#deps.sideStreamFn as unknown as BotStreamFn,
+				model,
+				auth: { apiKey, headers },
+				systemPrompt,
+				thread,
+				userText: trimmed,
+				view,
+				tools,
+				execute: (name, args) => runBotTool({ deps, tools, name, args, language: materials.config.language, beats }),
+				onDelta: o.onDelta,
+				onActivity: o.onActivity,
+				signal: ac.signal,
+				reasoning: this.#deps.getThinking?.(),
+			});
+			if ("error" in r) return r;
+			if (!r.text.trim()) return { error: "副编剧没有产出内容。" };
+			appendBotThread(file, [
+				{ role: "user", text: trimmed, ts: Date.now() },
+				{ role: "assistant", text: r.text, ts: Date.now() },
+			]);
+			return r;
+		} catch (err) {
+			return { error: `副编剧这一轮出错：${err instanceof Error ? err.message : String(err)}` };
+		} finally {
+			this.#botAbort = null;
+			this.#busy = false;
+		}
 	}
 
 	async #drain(): Promise<void> {

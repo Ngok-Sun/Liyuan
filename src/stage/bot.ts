@@ -1,0 +1,384 @@
+/**
+ * 幕后副编剧（docs/PLAN-COMPANION-BOT.md 刀 1）：与台前物理隔离的第二个线程。
+ *
+ * 送模内容＝闭合集合，在此声明（任何「在 X 时机再塞一段」都不在这里发生）：
+ *   system   [卡级 APPEND_SYSTEM.md（卡作者＋预设身份/破限站）] → [BOT.md（卡级覆盖 ‖ 全局 ‖ 随包默认）]
+ *   messages [每轮视野块（前情提要＋世界状态＋最近 K 拍；装配期虚拟物，不落线程）
+ *             ＋用户这轮的话——同一条 user 消息，注入在前、原话最后]
+ *            ＋[线程回放（只存用户原话与副编剧回复）] ＋ [本轮工具回执]
+ *   不装：全局 APPEND（拍法）、卡 AGENTS.md（写作块）、预设 after/深度段、预填、预设采样参数、作者正则。
+ *
+ * 隔离纪律（同档）：线程不进会话树、不进场记/摘要/记忆/压缩；主 agent 不知道它存在（见效果不见实体）；
+ * 副编剧不写正文——它没有 draft 工具；能力边界由工具面执行，不靠提示词。
+ *
+ * 纯函数＋注入（可离线单测）；宿主接线在 StageEngine.botTurn。
+ */
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+import { applyMacros } from "../card.ts";
+import { chatDirOfSessionDir } from "../cardspace.ts";
+import { cardTools } from "../tools/card.ts";
+import type { MacroContext } from "../types.ts";
+import { cardToolAvailable } from "./authoring.ts";
+import { runStageTool, stageTools, type StageTool, type StageToolDeps, type ToolRunResult } from "./tools.ts";
+
+/** 副编剧人设文件名（全局与卡级同名，对齐 APPEND_SYSTEM.md 的习惯） */
+export const BOT_PERSONA_FILE = "BOT.md";
+/** 线程落点（子项目级数据，与 世界状态.json / 面板.json 同级）：一局一份，多会话窗口共用 */
+export const BOT_THREAD_FILE = "副编剧.jsonl";
+/** 视野里默认带几拍（更早的走 story_read 工具）；验收时调 */
+export const BOT_VIEW_BEATS = 8;
+/** 工具轮安全阀：副编剧的活都是短活，8 轮足够；触阀以现有产出收束 */
+export const MAX_BOT_ROUNDS = 8;
+/** 线程回放上限（条，user/assistant 各算一条）：副编剧暂无压缩机制，先按条数截早 */
+export const BOT_THREAD_REPLAY = 40;
+
+/**
+ * 副编剧不装的名字：世界线族（用户点名不给 agent 的）、演出界面（panel 写/关）、换卡（会拔掉工作区）。
+ * 台上同名的读侧（panel_read / world_state_get / card_read）保留。
+ */
+export const BOT_TOOL_EXCLUDED = new Set([
+	"panel_write",
+	"panel_close",
+	"card_switch",
+	"worldline_back",
+	"worldline_list",
+	"worldline_store",
+]);
+
+// ---------------- 线程存储 ----------------
+
+export interface BotThreadEntry {
+	role: "user" | "assistant";
+	text: string;
+	ts?: number;
+}
+
+/**
+ * 线程文件路径：子项目目录下一份（与账本/面板同一层）——「一局」是子项目，不是单个会话文件；
+ * 同一子项目里开第二个会话窗口继续聊，副编剧的笔记本跟着走。
+ * 老布局/内存会话没有子项目目录，回落产品根 `.liyuan/副编剧/<sessionId>.jsonl`。
+ */
+export function botThreadPath(cwd: string, sessionDir: string | undefined, sessionId: string): string {
+	const chatDir = chatDirOfSessionDir(sessionDir);
+	if (chatDir) return join(chatDir, BOT_THREAD_FILE);
+	return join(cwd, ".liyuan", "副编剧", `${sessionId}.jsonl`);
+}
+
+/** 读线程（坏行跳过——手改过的文件不该让副编剧整个哑掉） */
+export function readBotThread(file: string): BotThreadEntry[] {
+	if (!existsSync(file)) return [];
+	let raw = "";
+	try {
+		raw = readFileSync(file, "utf8");
+	} catch {
+		return [];
+	}
+	const out: BotThreadEntry[] = [];
+	for (const line of raw.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			const e = JSON.parse(line) as Partial<BotThreadEntry>;
+			if ((e.role === "user" || e.role === "assistant") && typeof e.text === "string" && e.text.trim()) {
+				out.push({ role: e.role, text: e.text, ...(typeof e.ts === "number" ? { ts: e.ts } : {}) });
+			}
+		} catch {
+			// 坏行跳过
+		}
+	}
+	return out;
+}
+
+/** 追加一轮（user＋assistant 一起落，先落对话再落线程，中断不留半轮） */
+export function appendBotThread(file: string, entries: BotThreadEntry[]): void {
+	if (entries.length === 0) return;
+	try {
+		mkdirSync(dirname(file), { recursive: true });
+		appendFileSync(file, entries.map((e) => `${JSON.stringify(e)}\n`).join(""), "utf8");
+	} catch (err) {
+		console.error(`[bot] 线程落盘失败：${err instanceof Error ? err.message : String(err)}`);
+	}
+}
+
+// ---------------- 人设与 system ----------------
+
+/**
+ * 人设文件：卡级覆盖 ‖ 全局（agentDir，随包播种、用户可改）‖ 随包默认。
+ * 与 APPEND_SYSTEM.md 同一套两级规则；都缺时退随包 assets/BOT.md。
+ */
+export function readBotPersona(cardDir: string | null, agentDir: string): string {
+	const read = (p: string): string => {
+		try {
+			return existsSync(p) ? readFileSync(p, "utf8").trim() : "";
+		} catch {
+			return "";
+		}
+	};
+	if (cardDir) {
+		const card = read(join(cardDir, BOT_PERSONA_FILE));
+		if (card) return card;
+	}
+	const global = read(join(agentDir, BOT_PERSONA_FILE));
+	if (global) return global;
+	try {
+		return readFileSync(new URL("../../assets/BOT.md", import.meta.url), "utf8").trim();
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * system＝[卡级 APPEND_SYSTEM.md（宏展开）] → [人设（宏展开）]。
+ * 身份/破限站在前（立场材料），人设在后（贴生成点，最显著）——与导演备注同理：自家内容贴生成点。
+ */
+export function buildBotSystemPrompt(o: { cardAppend: string; persona: string; macro: MacroContext }): string {
+	const sections: string[] = [];
+	const append = o.cardAppend.trim();
+	if (append) sections.push(applyMacros(append, o.macro));
+	const persona = o.persona.trim();
+	if (persona) sections.push(applyMacros(persona, o.macro));
+	return sections.join("\n\n");
+}
+
+// ---------------- 视野 ----------------
+
+/** 一拍＝一次用户输入＋其后的正文（开场白算第 1 拍，用户栏为空） */
+export interface BotBeat {
+	user: string;
+	assistant: string;
+}
+
+/** 往拍历史（rebuildHistory 的 history，user/assistant 交替）→ 拍 */
+export function beatsOf(history: Array<{ role: "user" | "assistant"; text: string }>): BotBeat[] {
+	const beats: BotBeat[] = [];
+	for (const m of history) {
+		const last = beats[beats.length - 1];
+		if (m.role === "user" || !last) {
+			beats.push({ user: m.role === "user" ? m.text : "", assistant: m.role === "assistant" ? m.text : "" });
+			continue;
+		}
+		last.assistant = last.assistant ? `${last.assistant}\n\n${m.text}` : m.text;
+	}
+	return beats;
+}
+
+/** 按拍渲染（视野块与 story_read 共用一份版式） */
+export function renderBeats(beats: BotBeat[], from: number, count: number, header?: string): string {
+	const lines: string[] = [];
+	if (header) lines.push(header);
+	const end = Math.min(beats.length, from + count);
+	for (let i = from; i < end; i++) {
+		const b = beats[i]!;
+		if (b.user.trim()) lines.push(`〔第 ${i + 1} 拍·用户〕${b.user.trim()}`);
+		if (b.assistant.trim()) lines.push(`〔第 ${i + 1} 拍·正文〕${b.assistant.trim()}`);
+	}
+	return lines.join("\n\n");
+}
+
+/**
+ * 每轮视野块：前情提要（rp-summary 既有产物）＋世界状态（与台前同源）＋最近 K 拍。
+ * 装配期虚拟物——与用户这轮的话拼成同一条 user 消息，不落线程、不进任何沉淀物。
+ */
+export function buildBotView(o: { summary?: string; state: string; beats: BotBeat[]; window?: number }): string {
+	const blocks: string[] = [];
+	if (o.summary?.trim()) blocks.push(`【前情提要】以下是更早剧情的接力摘要，是既定事实：\n\n${o.summary.trim()}`);
+	if (o.state.trim()) blocks.push(`【世界状态】\n${o.state.trim()}`);
+	const window = o.window ?? BOT_VIEW_BEATS;
+	if (o.beats.length > 0) {
+		const from = Math.max(0, o.beats.length - window);
+		blocks.push(renderBeats(o.beats, from, o.beats.length - from, `【最近剧情】（第 ${from + 1}–${o.beats.length} 拍；更早的用 story_read 按拍读）`));
+	}
+	return blocks.join("\n\n");
+}
+
+// ---------------- 工具面 ----------------
+
+/** 读更早的剧情（默认视野只带最近 K 拍，往前读走它） */
+export const STORY_READ_TOOL: StageTool = {
+	name: "story_read",
+	mode: "read",
+	description: "读更早的剧情原文。默认视野只含最近若干拍；要往前读、或重读某一拍时用它。按拍编号：from＝起始拍（1 起），count＝读几拍。",
+	parameters: {
+		type: "object",
+		properties: {
+			from: { type: "integer", minimum: 1, description: "起始拍号（1＝本局第 1 拍）" },
+			count: { type: "integer", minimum: 1, maximum: 30, description: "读几拍（默认 8）" },
+		},
+		required: [],
+	},
+};
+
+/** 读侧全给（世界书/记忆/卡/面板/账本＋story_read）＋写侧＝用户的持久资料与卡工程（右栏助手退场留下的 assistant 面＋authoring 面） */
+export function botTools(language: string, deps: StageToolDeps): StageTool[] {
+	const base = stageTools(language, deps).filter((t) => !BOT_TOOL_EXCLUDED.has(t.name));
+	const cards: StageTool[] = cardTools
+		.filter((s) => (s.surfaces.includes("assistant") || s.surfaces.includes("authoring")) && !BOT_TOOL_EXCLUDED.has(s.name) && cardToolAvailable(s.name, deps))
+		.map((s) => ({
+			name: s.name,
+			mode: s.mode,
+			description: s.description({ surface: "assistant", language }),
+			parameters: s.parameters({ surface: "assistant", language }),
+		}));
+	// 同名去重（card_read 同时在 stage 面与 assistant 面）
+	return [...new Map([...base, STORY_READ_TOOL, ...cards].map((t) => [t.name, t])).values()];
+}
+
+function storyRead(beats: BotBeat[], args: Record<string, unknown>): ToolRunResult {
+	if (beats.length === 0) return { text: "本局还没有剧情。", activity: "读剧情" };
+	const rawFrom = Math.floor(Number(args.from));
+	const rawCount = Math.floor(Number(args.count));
+	const from = Number.isFinite(rawFrom) ? Math.max(1, rawFrom) : 1;
+	const count = Number.isFinite(rawCount) ? Math.min(30, Math.max(1, rawCount)) : 8;
+	if (from > beats.length) return { text: `本局目前只有 ${beats.length} 拍。`, activity: "读剧情" };
+	const end = Math.min(beats.length, from + count - 1);
+	return { text: renderBeats(beats, from - 1, count, `【剧情·第 ${from}–${end} 拍】`), activity: `读剧情（第 ${from} 拍起）` };
+}
+
+/**
+ * 派发一次工具调用。顺序：story_read → card 族（authoring＋assistant 两面，与 agent 模式共用实现）
+ * → 统一工具层＋world_state_get（与台上同一条实现）。
+ * 不在清单里的名字回「未知工具」文本，不抛（与台上同一容错契约）。
+ */
+export async function runBotTool(o: {
+	deps: StageToolDeps;
+	tools: StageTool[];
+	name: string;
+	args: Record<string, unknown>;
+	language: string;
+	beats: BotBeat[];
+}): Promise<ToolRunResult> {
+	const { deps, name, args, language } = o;
+	if (!o.tools.some((t) => t.name === name)) return { text: `未知工具 ${name}。` };
+	if (name === "story_read") return storyRead(o.beats, args);
+	const spec = cardTools.find((s) => s.name === name && (s.surfaces.includes("assistant") || s.surfaces.includes("authoring")) && cardToolAvailable(s.name, deps));
+	if (spec) {
+		const r = await spec.run(args, deps, { surface: "assistant", language });
+		return {
+			text: r.text,
+			...(r.activity ? { activity: r.activity } : {}),
+			...(r.details !== undefined ? { details: r.details } : {}),
+			...(r.isError ? { isError: true } : {}),
+		};
+	}
+	return runStageTool(deps, name, args, language);
+}
+
+// ---------------- 循环 ----------------
+
+/** @liyuan/ai streamSimple 的结构子集（含 tools；独立声明避免与 engine 的类型相互牵连） */
+export interface BotAssistantMsg {
+	role: "assistant";
+	content: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; arguments?: Record<string, unknown> }>;
+	stopReason?: string;
+	errorMessage?: string;
+	[k: string]: unknown;
+}
+
+export interface BotStreamEvent {
+	type: string;
+	delta?: string;
+	message?: BotAssistantMsg;
+	error?: BotAssistantMsg;
+}
+
+export type BotStreamFn = (
+	model: unknown,
+	context: { systemPrompt?: string; messages: unknown[]; tools?: unknown[] },
+	options?: Record<string, unknown>,
+) => AsyncIterable<BotStreamEvent> & { result(): Promise<BotAssistantMsg> };
+
+const botUserMessage = (text: string) => ({ role: "user", content: [{ type: "text", text }], timestamp: 0 });
+/** 线程回放用的 assistant 形态（与 conversation-mode.ts 的 asAssistant 同形——历史消息不是真 API 产物） */
+const botAssistantMessage = (text: string) => ({
+	role: "assistant",
+	content: [{ type: "text", text }],
+	timestamp: 0,
+	stopReason: "stop",
+	api: "openai-completions",
+	provider: "history",
+	model: "history",
+	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+});
+const botToolResult = (toolCallId: string, toolName: string, r: ToolRunResult) => ({
+	role: "toolResult",
+	toolCallId,
+	toolName,
+	content: [{ type: "text", text: r.text }],
+	isError: r.isError === true,
+	timestamp: 0,
+});
+
+const botTextOf = (msg: BotAssistantMsg): string =>
+	msg.content
+		.filter((c) => c.type === "text")
+		.map((c) => c.text ?? "")
+		.join("");
+
+export interface BotLoopOptions {
+	stream: BotStreamFn;
+	model: unknown;
+	auth: { apiKey?: string; headers?: Record<string, string | null> };
+	systemPrompt: string;
+	/** 线程回放（已截断） */
+	thread: BotThreadEntry[];
+	/** 用户这轮的话 */
+	userText: string;
+	/** 每轮视野块（装配期虚拟物；与用户话拼成同一条消息，注入在前） */
+	view: string;
+	tools: StageTool[];
+	execute: (name: string, args: Record<string, unknown>) => Promise<ToolRunResult>;
+	onDelta?: (kind: "text" | "thinking", delta: string) => void;
+	onActivity?: (detail: string) => void;
+	signal?: AbortSignal;
+	reasoning?: string;
+	maxTokens?: number;
+	maxRounds?: number;
+}
+
+/** 一轮副编剧＝一次小循环：模型流＋工具派发，无稿纸、无场记、无压缩。文本取最后一轮（中间轮旁白不落线程）。 */
+export async function runBotLoop(o: BotLoopOptions): Promise<{ text: string } | { error: string }> {
+	const maxRounds = o.maxRounds ?? MAX_BOT_ROUNDS;
+	const messages: unknown[] = [
+		...o.thread.map((e) => (e.role === "user" ? botUserMessage(e.text) : botAssistantMessage(e.text))),
+		botUserMessage(o.view ? `${o.view}\n\n${o.userText}` : o.userText),
+	];
+	const tools = o.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+	const options: Record<string, unknown> = {
+		apiKey: o.auth.apiKey,
+		headers: o.auth.headers,
+		maxTokens: o.maxTokens ?? 8192,
+		signal: o.signal,
+		...(o.reasoning !== undefined ? { reasoning: o.reasoning } : {}),
+	};
+	let lastText = "";
+	for (let round = 0; round < maxRounds; round++) {
+		const s = o.stream(o.model, { systemPrompt: o.systemPrompt, messages, tools }, options);
+		let final: BotAssistantMsg | null = null;
+		for await (const e of s) {
+			if (e.type === "text_delta" && e.delta) o.onDelta?.("text", e.delta);
+			else if (e.type === "thinking_delta" && e.delta) o.onDelta?.("thinking", e.delta);
+			else if (e.type === "done") final = e.message ?? null;
+			else if (e.type === "error") return { error: e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}` };
+		}
+		if (!final) return { error: "流未产出最终消息" };
+		const text = botTextOf(final);
+		if (text.trim()) lastText = text;
+		const calls = final.content.filter((c) => c.type === "toolCall" && typeof c.name === "string" && c.name);
+		messages.push(final);
+		if (calls.length === 0) return { text };
+		for (const [i, call] of calls.entries()) {
+			const id = typeof call.id === "string" && call.id ? call.id : `bot-${round}-${i}`;
+			let result: ToolRunResult;
+			try {
+				result = await o.execute(call.name!, call.arguments ?? {});
+			} catch (err) {
+				result = { text: `工具执行出错：${err instanceof Error ? err.message : String(err)}`, isError: true };
+			}
+			if (result.activity) o.onActivity?.(result.activity);
+			messages.push(botToolResult(id, call.name!, result));
+		}
+	}
+	// 触阀：以现有产出收束（不报错——用户看得见已流出的字）
+	return { text: lastText };
+}

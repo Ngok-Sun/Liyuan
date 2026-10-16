@@ -3071,6 +3071,46 @@ const hostCompact = async (): Promise<void> => {
 };
 
 /** 发送用户输入（含斜杠命令；命令后全量对齐所有端） */
+/**
+ * 副编剧入口（PLAN-COMPANION-BOT 刀 1）：/bot <话>。
+ * 引擎侧＝stage.botTurn（独立线程、与台前串行）；界面（抽屉）在下一刀——没有命令行在场时
+ * 先如实告知，不让它变成一个黑洞。
+ */
+const handleBotPrompt = async (text: string) => {
+	// 回执两处都到：CLI 看终端、Web 看 notify（副编剧的主要面是命令行，只广播等于没回执）
+	const say = (level: "info" | "warning" | "error", message: string) => {
+		cli?.out(`[${level}] ${message}`);
+		broadcast({ type: "notify", level, text: message });
+	};
+	if (stage.mode === "agent") {
+		say("warning", t("副编剧只服务扮演会话"));
+		return;
+	}
+	if (!text) {
+		say("info", t("用法：/bot <话>——幕后副编剧：问剧情、点评、改设定，独立线程不进剧情历史"));
+		return;
+	}
+	if (!cli) {
+		say("info", t("副编剧界面还没接，当前只在命令行可用"));
+		return;
+	}
+	if (storyStreaming()) {
+		say("warning", t("请等当前回复完成（或先停止），再{what}", { what: t("唤副编剧") }));
+		return;
+	}
+	cli.out("[副编剧]"); // i18n-ignore：终端日志
+	const r = await stage.botTurn(text, {
+		onDelta: (kind, delta) => cli?.stream(kind, delta),
+		onActivity: (d) => cli?.out(`[activity] ${d}`),
+	});
+	cli.out("");
+	if ("error" in r) {
+		cli.out(`[error] ${r.error}`); // i18n-ignore：终端日志
+		broadcast({ type: "notify", level: "error", text: t("副编剧没有完成这一轮") });
+	}
+	cli.out("[end] mode=bot"); // i18n-ignore：终端日志（与台上 [end] mode=… 同一约定，驱动器据此续跑）
+};
+
 const handlePrompt = async (text: string) => {
 	const trimmed = text.trim();
 	// 导演备注（PLAN-DIRECTOR-NOTE）：戏外当拍指示的武装/清除。不落树、不进历史——
@@ -3088,6 +3128,13 @@ const handlePrompt = async (text: string) => {
 			level: "info",
 			text: note ? t("导演备注已就位，将影响下一拍：{note}", { note }) : t("已清除导演备注"),
 		});
+		return;
+	}
+	// 副编剧（PLAN-COMPANION-BOT 刀 1）：第二个线程——独立存储、不进正史、主 agent 不知道它存在。
+	// 每句落进持久线程；输入口默认仍属台前。界面（抽屉）在下一刀，当前只接命令行。
+	const botMatch = /^\/bot(?:[ \t]+([\s\S]*))?$/i.exec(trimmed);
+	if (botMatch) {
+		await handleBotPrompt((botMatch[1] ?? "").trim());
 		return;
 	}
 	// ST 式变体：无参 /reroll 与 /swipe 由宿主处理（需重开一拍，扩展命令上下文无此能力）
