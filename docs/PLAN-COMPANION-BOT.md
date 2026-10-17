@@ -206,7 +206,7 @@ bot 抽屉 / 浮窗（TG/QQ bot 形态）、线程渲染与流式、历史加载
     6. **线程**：`<子项目>/副编剧.jsonl` 6 条（三问三答，只存原话与回复）；第二轮请求带第一轮对话。
   - 观察（实弹）：副编剧思考里出现过一次无关的「往局记忆」串味（card 级记忆在视野工具结果里），最终答复不受影响——记录，不处理。
 
-- 2026-10-17 **刀 2 落地（工作模式拆除＋主 agent 权限限制＋原生七工具接法），实弹验收全过（未提交）**。
+- 2026-10-17 **刀 2 落地（工作模式拆除＋主 agent 权限限制＋原生七工具接法），实弹验收全过（已随 `e9257f6` 提交）**。
 
   **原生七工具接法（刀 2 前置，已落）**：`ToolDefinition.execute` 只有 `read` 用 `ctx?.model`（非视觉图片提示）、`bash` 是 `if (exposeSessionEnvironment && ctx)` 守卫、其余五件 `_ctx?` 根本不看——**ctx 缺省可用**。故接法＝`StageAgentSession.getToolDefinition?(name)` 一条执行口：描述/schema 照抄 pi 的注册定义，执行借 pi 的实现；沙箱门在 `#botNativeTools` 里用**同一份** `createSandboxGate` 自己关一遍（台上那道挂在 pi 的 `tool_call` 钩子上，副编剧的循环不经过 pi）。`backendControl: false` 与台上、agent 模式同一开关、同一语义（副编剧面也没有原生工具）。
 
