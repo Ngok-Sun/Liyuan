@@ -13978,6 +13978,9 @@ html[data-has-wallpaper="true"] .composer-box {
 	align-items: center;
 	justify-content: center;
 	overflow: hidden;
+	/* 底部渐隐：立绘下缘融进背景，像从画面里走出来 */
+	-webkit-mask-image: linear-gradient(to bottom, #000 72%, rgba(0, 0, 0, 0.55) 88%, transparent 99%);
+	mask-image: linear-gradient(to bottom, #000 72%, rgba(0, 0, 0, 0.55) 88%, transparent 99%);
 	animation: sprite-in 0.35s ease-out;
 }
 .char-sprite img {
