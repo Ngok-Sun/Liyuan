@@ -304,6 +304,17 @@ export default function App() {
 	const [chatCollapsed, setChatCollapsed] = useState(() => {
 		try { return localStorage.getItem("liyuan.agentChatCollapsed") === "1"; } catch { return false; }
 	});
+	/** 角色大立绘开关（ Chief fork ）：偏好持久化，刷新不丢 */
+	const [spriteOn, setSpriteOn] = useState(() => {
+		try { return localStorage.getItem("liyuan.charSprite") === "1"; } catch { return false; }
+	});
+	const toggleSprite = useCallback(() => {
+		setSpriteOn((v) => {
+			const nv = !v;
+			try { localStorage.setItem("liyuan.charSprite", nv ? "1" : "0"); } catch { /* 私隐模式无视 */ }
+			return nv;
+		});
+	}, []);
 	const pagesRef = useRef<HTMLDivElement | null>(null);
 	const storyDragRef = useRef(false);
 	/** 讨论区检查点卡片点击 → 稿子视图历史里展开它 */
@@ -2738,6 +2749,17 @@ export default function App() {
 							)}
 						</div>
 					)}
+					<button
+						type="button"
+						className={`tb-btn ${spriteOn ? "active" : ""}`}
+						onClick={toggleSprite}
+						aria-label={t("立绘")}
+						aria-pressed={spriteOn}
+						data-tip={t("立绘")}
+						title={t("立绘")}
+					>
+						<IconCard size={18} />
+					</button>
 				</div>
 				{/* 右侧：当前用户角色（Persona）快速选择气泡 */}
 				<div className="tb-side tb-side-right">
@@ -3201,6 +3223,12 @@ export default function App() {
 						<button className="jump-bottom" onClick={jumpToBottom} title={t("回到最新")} aria-label={t("回到最新")}>
 							<IconChevronDown size={17} />
 						</button>
+					)}
+					{/* 角色大立绘（ Chief fork ）：固定悬浮左下，不随滚动；无卡图/关闭时消失；窄屏隐藏 */}
+					{spriteOn && !welcome && charAvatarUrl && (
+						<div className="char-sprite" aria-hidden="true">
+							<img src={charAvatarUrl} alt="" draggable={false} />
+						</div>
 					)}
 					</div>
 					{rightPanel && (() => {

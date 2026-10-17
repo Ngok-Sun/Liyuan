@@ -90,6 +90,9 @@ export const app: Record<string, string> = {
 	"告警 {n} 条": "{n} warning|{n} warnings",
 	"暂无告警（旁侧审计的警告会留在这里）": "No warnings (side-audit warnings collect here)",
 	"清空": "Clear",
+	"写卡平台": "Card studio",
+	"会话树": "Session tree",
+	"立绘": "Character sprite",
 
 	// 舞台 / 稿子
 	"文件和对话一起回到「{msg}」这轮输入之前？之后的讨论会从当前会话里截掉。": "Restore files and chat to just before the input “{msg}”? Later discussion is cut from the current session.",

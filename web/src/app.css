@@ -13955,3 +13955,45 @@ html[data-has-wallpaper="true"] .composer-box {
 	color: var(--accent);
 	background: var(--accent-wash);
 }
+
+/* ============================================================
+   角色大立绘（Chief fork）：固定悬浮在聊天列左下
+   - 不随消息滚动（absolute 锚在 stage-col-left）
+   - pointer-events:none 完全点击穿透，不挡正文操作
+   - 卡图缺失时上层 JSX 已不渲染；窄屏直接隐藏
+   ============================================================ */
+.char-sprite {
+	position: absolute;
+	left: 0;
+	bottom: calc(var(--composer-h, 0px) + 8px);
+	z-index: 3;
+	pointer-events: none;
+	user-select: none;
+	-webkit-user-drag: none;
+	/* 底部渐隐融入，像从画面里走出来 */
+	-webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent 100%);
+	mask-image: linear-gradient(to bottom, #000 82%, transparent 100%);
+	animation: sprite-in 0.35s ease-out;
+}
+.char-sprite img {
+	display: block;
+	height: min(56vh, 560px);
+	max-width: min(30vw, 340px);
+	width: auto;
+	object-fit: contain;
+	object-position: left bottom;
+	/* 柔和压边，别抢正文戏 */
+	filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.35)) saturate(0.92);
+	opacity: 0.92;
+}
+@keyframes sprite-in {
+	from { opacity: 0; transform: translateY(12px); }
+	to { opacity: 1; transform: none; }
+}
+@media (max-width: 760px) {
+	.char-sprite { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.char-sprite { animation: none; }
+}
+
