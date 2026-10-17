@@ -48,7 +48,7 @@ import { findInitVar, findSchemaDefaults, seedMvuIfNeeded } from "../src/mvu.ts"
 import { authorScriptManifest, extractAuthorScripts } from "../src/authorScripts.ts";
 import { buildGreeting } from "../src/greeting.ts";
 import { StageEngine, type AssistantMsgLike, type StageModelLike, type StageStreamFn } from "../src/stage/engine.ts";
-import { displayConversationBranch, storyBranch, messageMode, isConversationMode } from "../src/conversation-mode.ts";
+import { displayConversationBranch, storyBranch, messageMode } from "../src/conversation-mode.ts";
 import { cardProjectOperation, previewCardProject } from "../src/card-authoring.ts";
 import { buildCardPreviewRequest, CardPreviewHub } from "./card-preview.ts";
 import { ScreenshotHub, type ScreenshotReport } from "./screenshot.ts";
@@ -2919,6 +2919,7 @@ stage = new StageEngine({
 		updateCardFields(currentCardPath(cwd, loadConfig(cwd)), patch);
 		void restHost.softRefreshConfig();
 	},
+	// 卡工程宿主件（card_project / card_create / card_update）：工作模式退场后由 agent 模式与副编剧面消费
 	authoring: {
 		project: async (args) => {
 			const config = loadConfig(cwd);
@@ -2935,7 +2936,6 @@ stage = new StageEngine({
 	afterAuthoringTurn: () => restHost.softRefreshConfig(),
 	sideStreamFn: (model, context, options) => session.modelRuntime.streamSimple(model as never, context as never, options as never) as unknown as ReturnType<StageStreamFn>,
 	events: {
-		onModeChanged: (mode) => { broadcast({ type: "conversation_mode", mode, turnMode: stage.turnMode }); resyncAll(); },
 		onTurnStart: () => { cli?.out(""); broadcast({ type: "agent", state: "start" }); },
 		onDelta: (kind, delta, draft, reset) => {
 			if (!draft) cli?.stream(kind, delta);
@@ -2975,7 +2975,6 @@ stage = new StageEngine({
 			const stats = safeStats();
 			if (stats) broadcast({ type: "stats", stats });
 			// 向量记忆入库：只在真落了新正文时（中断/错误拍不入）
-			if (info.mode === "authoring") return;
 			// agent 模式：正文是文件，不是讨论——检查点里新增的文件逐个入库（修改/改名不入）
 			if (info.mode === "agent") {
 				if (!info.checkpoint?.added.length || info.aborted || !info.entryId) return;
@@ -3627,12 +3626,6 @@ wss.on("connection", (ws, req) => {
 							broadcast({ type: "draft_workspace", workspace: workspaceView(restored), streaming: stage.isStreaming });
 							break;
 						}
-					case "conversation_mode": {
-						if (!isConversationMode(frame.mode)) throw new Error(t("未知会话模式。"));
-						if (storyStreaming()) throw new Error(t("请等当前回复完成（或先停止），再{what}", { what: t("切换模式。") }));
-						stage.setMode(frame.mode);
-						break;
-					}
 					case "prompt": {
 						const text = String(frame.text ?? "").trim();
 						if (text) await handlePrompt(text);

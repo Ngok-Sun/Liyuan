@@ -1256,7 +1256,6 @@ export default function roleplayExtension(pi: ExtensionAPI) {
 	};
 	pi.on("before_agent_start", (event) => {
 		if (!activeStage) return undefined;
-		if (activeStage.mode === "authoring") return { systemPrompt: activeStage.systemPrompt };
 		let base = event.systemPrompt;
 		if (!event.systemPromptOptions?.customPrompt) {
 			const skeleton = stageSystemSkeleton();

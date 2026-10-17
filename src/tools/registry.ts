@@ -37,10 +37,10 @@ export type ToolDomain =
  * 那是**待接的设计意图**（测试里以「三面共用」钉着），不是已经接上的事实——
  * 别照着 surfaces 就以为扩展侧拿得到它们。
  *
- * ⚠ `"assistant"` **自 2026-09-12 起也没有消费者**：右栏助手（server/assistant.ts）已删。
+ * ⚠ `"assistant"` 的消费者是**幕后副编剧**（2026-10-16 刀 1；此前自 09-12 右栏助手删除后空置）。
  * 只挂在这个面上的 spec（preset_* / persona_* / stage_skill_* / card_switch / card_update /
- * card_greetings / worldline_back）暂留为工作模式收编的候选；要它们上台就把 `"authoring"`
- * 加进 surfaces，不要另起注册。
+ * card_greetings / worldline_back）由它取用；要它们上台就把 `"stage"` 加进 surfaces，
+ * 不要另起注册。工作模式（authoring）已随刀 2 退场，`"authoring"` 面继续供卡族给 agent 模式与副编剧。
  */
 export type ToolSurface = "stage" | "authoring" | "assistant" | "extension";
 

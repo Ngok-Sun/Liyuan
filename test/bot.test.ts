@@ -213,6 +213,33 @@ const loopBase = {
 	execute: async () => ({ text: "命中 1 条" }),
 };
 
+test("bot：原生工具进清单并派发；抛错回可读文本不打断这一轮；图片块随回执带走", async () => {
+	const deps = {} as StageToolDeps;
+	const seen: Array<{ args: Record<string, unknown> }> = [];
+	const native = [
+		{ name: "read", mode: "read" as const, description: "读文件", parameters: { type: "object" }, run: async (args: Record<string, unknown>) => { seen.push({ args }); return { text: `读了 ${args.path}`, images: [{ data: "AAA", mimeType: "image/png" }] }; } },
+		{ name: "bash", mode: "write" as const, description: "跑命令", parameters: { type: "object" }, run: async () => { throw new Error("炸了"); } },
+	];
+	const tools = botTools("中文", deps, native);
+	assert.ok(tools.some((t) => t.name === "read") && tools.some((t) => t.name === "bash"));
+	const r = await runBotTool({ deps, tools, native, name: "read", args: { path: "卡.json" }, language: "中文", beats: [] });
+	assert.equal(r.text, "读了 卡.json");
+	assert.deepEqual(seen, [{ args: { path: "卡.json" } }]);
+	const boom = await runBotTool({ deps, tools, native, name: "bash", args: {}, language: "中文", beats: [] });
+	assert.equal(boom.isError, true);
+	assert.match(boom.text, /炸了/);
+	// 图片块经循环回填进 toolResult（read 读图片时走这条）
+	const { stream } = scripted([
+		[asstMsg([{ tool: { id: "c1", name: "read", args: { path: "立绘.png" } } }])],
+		[asstMsg([{ text: "看过了。" }])],
+	]);
+	const looped = await runBotLoop({
+		...loopBase, stream, tools,
+		execute: (name, args) => runBotTool({ deps, tools, native, name, args, language: "中文", beats: [] }),
+	});
+	assert.deepEqual(looped, { text: "看过了。" });
+});
+
 test("bot：一轮直答——单次调用、返回文本、视野块与用户话同条消息", async () => {
 	const { stream, contexts } = scripted([[asstMsg([{ text: "是玄机子。" }])]]);
 	const r = await runBotLoop({ ...loopBase, stream });

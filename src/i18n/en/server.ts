@@ -145,8 +145,6 @@ export const server: Record<string, string> = {
 	"不是本项目的会话文件": "Not a session file of this project",
 	"当前分支没有这份稿件。": "This draft is not on the current branch.",
 	"只能恢复当前拍的稿件版本。": "Only the current beat's draft versions can be restored.",
-	"未知会话模式。": "Unknown conversation mode.",
-	"切换模式。": "switching modes.",
 	"切换会话": "switching sessions",
 	"已切换会话": "Session switched",
 	"新建会话": "creating a session",

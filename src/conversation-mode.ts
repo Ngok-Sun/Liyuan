@@ -73,38 +73,11 @@ export function storyBranch<T extends ConversationEntry>(branch: T[]): T[] {
 }
 
 /**
- * 维护记录在上下文里的形态（2026-09-11 用户定案「无缝切换」）：扮演模式也看得见维护性的
- * 输入与输出，但作为带标记的外围消息，不与剧情混淆——可见性归上下文，持久化归账本（storyBranch
- * 仍然整体滤掉它们，场记/摘要/记忆/向量库不变）。
+ * 2026-10-16 刀 2（docs/PLAN-COMPANION-BOT.md §三）：工作模式退场。
+ * 树上**遗留**的 authoring 条目照旧认得（旧会话要读得回来，story 流照旧滤掉它们），
+ * 但不再有新条目产生，维护段也不再进台前上下文——`roleplayHistory` 随工作模式一并退场，
+ * 写卡维护改由副编剧（assets/BOT.md）承担。
  */
-export const AUTHORING_CONTEXT_TAG = "【写卡维护】";
-
-/** 扮演上下文：story 流 ＋ 维护性 user/assistant 文本（加标记、剥工具过程）。 */
-export function roleplayHistory<T extends ConversationEntry>(branch: T[]): ContextMessage[] {
-	const out: ContextMessage[] = [];
-	const add = (role: "user" | "assistant", text: string) => {
-		const clean = text.trim();
-		if (!clean) return;
-		out.push(role === "user"
-			? { role: "user", content: [{ type: "text", text: `${AUTHORING_CONTEXT_TAG}（用户对写卡 agent 说）
-${clean}` }], timestamp: 0 }
-			: { role: "assistant", content: [{ type: "text", text: `${AUTHORING_CONTEXT_TAG}（写卡 agent 的答复）
-${clean}` }], timestamp: 0, stopReason: "stop" });
-	};
-	const hidden = authoringRequestIds(branch);
-	let authoring = false;
-	for (const e of branch) {
-		if (e.type === "message" && e.message) {
-			const m = e.message as ContextMessage;
-			if (m.role === "user") authoring = hidden.has(e.id ?? "") || messageMode(m) === "authoring";
-			if (!authoring && messageMode(m) !== "authoring") continue; // 剧情消息走 story 流，这里只补维护段
-			if (m.role === "user") add("user", contextText(m.content));
-			else if (m.role === "assistant") add("assistant", contextText(m.content));
-		}
-	}
-	return out;
-}
-
 export function processRecord(entry: ConversationEntry): ProcessRecord | undefined {
 	if (entry.type !== "custom" || entry.customType !== CONVERSATION_PROCESS_TYPE) return undefined;
 	const d = entry.data as ProcessRecord | undefined;
@@ -123,7 +96,13 @@ const asAssistant = (text: string): ContextMessage => ({
 	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 });
 
-/** Replays native call/result pairs and raw text, without RP cleanup or author regexes. */
+/**
+ * 原始过程回放：native 调用/回执成对重放＋原文本，不过 RP 清洗、不过作者正则。
+ *
+ * 名字里的 authoring 是工作模式留下的旧名（刀 2 后工作模式已退场）：**今天的唯一消费者是
+ * agent 模式的讨论层**（src/stage/discussion.ts 的 agentHistory／讨论压缩，engine 的 agent 轮装配）。
+ * 它回放的是「树上的原始过程」，与「谁在写卡」无关——故刀 2 留，不随工作模式删。
+ */
 export function authoringHistory(branch: ConversationEntry[]): ContextMessage[] {
 	const messages: ContextMessage[] = [];
 	let rawFinal: ContextMessage | undefined;

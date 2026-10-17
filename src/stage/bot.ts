@@ -129,13 +129,19 @@ export function readBotPersona(cardDir: string | null, agentDir: string): string
 }
 
 /**
- * system＝[卡级 APPEND_SYSTEM.md（宏展开）] → [人设（宏展开）]。
+ * system＝[卡级 APPEND_SYSTEM.md（宏展开）] → [环境事实（工作目录/当前角色卡）] → [人设（宏展开）]。
  * 身份/破限站在前（立场材料），人设在后（贴生成点，最显著）——与导演备注同理：自家内容贴生成点。
+ *
+ * 环境事实是**数据不是指令**：原生文件工具按 cwd 解析相对路径，不告诉它就会像没头苍蝇一样
+ * 从工程根开始 `ls .`（实弹：一问「看看卡目录」就在工程根上撞沙箱门）。与 agent 模式、
+ * 旧工作模式同一行事实、同一位置语义。
  */
-export function buildBotSystemPrompt(o: { cardAppend: string; persona: string; macro: MacroContext }): string {
+export function buildBotSystemPrompt(o: { cardAppend: string; persona: string; macro: MacroContext; env?: string }): string {
 	const sections: string[] = [];
 	const append = o.cardAppend.trim();
 	if (append) sections.push(applyMacros(append, o.macro));
+	const env = o.env?.trim();
+	if (env) sections.push(env);
 	const persona = o.persona.trim();
 	if (persona) sections.push(applyMacros(persona, o.macro));
 	return sections.join("\n\n");
@@ -194,6 +200,20 @@ export function buildBotView(o: { summary?: string; state: string; beats: BotBea
 
 // ---------------- 工具面 ----------------
 
+/**
+ * pi 原生工具（read / write / edit / bash / grep / find / ls）在副编剧面上的形态：
+ * 描述与 schema 照抄 pi 的注册定义，执行由宿主闭包包住（沙箱门也在那个闭包里）——
+ * 引擎与 bot.ts 都不碰 pi（src/ 的既有纪律：结构类型＋注入）。
+ */
+export interface BotNativeTool extends StageTool {
+	run(args: Record<string, unknown>, signal?: AbortSignal): Promise<BotToolResult>;
+}
+
+/** 原生工具的执行产出：文本＋可选图片块（read 读图片时）；与 ToolRunResult 同形再带 images */
+export interface BotToolResult extends ToolRunResult {
+	images?: Array<{ data: string; mimeType: string }>;
+}
+
 /** 读更早的剧情（默认视野只带最近 K 拍，往前读走它） */
 export const STORY_READ_TOOL: StageTool = {
 	name: "story_read",
@@ -209,8 +229,8 @@ export const STORY_READ_TOOL: StageTool = {
 	},
 };
 
-/** 读侧全给（世界书/记忆/卡/面板/账本＋story_read）＋写侧＝用户的持久资料与卡工程（右栏助手退场留下的 assistant 面＋authoring 面） */
-export function botTools(language: string, deps: StageToolDeps): StageTool[] {
+/** 读侧全给（世界书/记忆/卡/面板/账本＋story_read）＋写侧＝用户的持久资料与卡工程（右栏助手退场留下的 assistant 面＋authoring 面）＋原生工具（宿主注入） */
+export function botTools(language: string, deps: StageToolDeps, native: BotNativeTool[] = []): StageTool[] {
 	const base = stageTools(language, deps).filter((t) => !BOT_TOOL_EXCLUDED.has(t.name));
 	const cards: StageTool[] = cardTools
 		.filter((s) => (s.surfaces.includes("assistant") || s.surfaces.includes("authoring")) && !BOT_TOOL_EXCLUDED.has(s.name) && cardToolAvailable(s.name, deps))
@@ -220,8 +240,8 @@ export function botTools(language: string, deps: StageToolDeps): StageTool[] {
 			description: s.description({ surface: "assistant", language }),
 			parameters: s.parameters({ surface: "assistant", language }),
 		}));
-	// 同名去重（card_read 同时在 stage 面与 assistant 面）
-	return [...new Map([...base, STORY_READ_TOOL, ...cards].map((t) => [t.name, t])).values()];
+	// 同名去重（card_read 同时在 stage 面与 assistant 面）；原生工具排在最后，同名以它为准（pi 是唯一实现）
+	return [...new Map([...base, STORY_READ_TOOL, ...cards, ...native].map((t) => [t.name, t])).values()];
 }
 
 function storyRead(beats: BotBeat[], args: Record<string, unknown>): ToolRunResult {
@@ -236,20 +256,30 @@ function storyRead(beats: BotBeat[], args: Record<string, unknown>): ToolRunResu
 }
 
 /**
- * 派发一次工具调用。顺序：story_read → card 族（authoring＋assistant 两面，与 agent 模式共用实现）
- * → 统一工具层＋world_state_get（与台上同一条实现）。
+ * 派发一次工具调用。顺序：原生工具（宿主闭包，含沙箱门）→ story_read → card 族（authoring＋assistant 两面，
+ * 与 agent 模式共用实现）→ 统一工具层＋world_state_get（与台上同一条实现）。
  * 不在清单里的名字回「未知工具」文本，不抛（与台上同一容错契约）。
  */
 export async function runBotTool(o: {
 	deps: StageToolDeps;
 	tools: StageTool[];
+	native?: BotNativeTool[];
 	name: string;
 	args: Record<string, unknown>;
 	language: string;
 	beats: BotBeat[];
-}): Promise<ToolRunResult> {
+	signal?: AbortSignal;
+}): Promise<BotToolResult> {
 	const { deps, name, args, language } = o;
 	if (!o.tools.some((t) => t.name === name)) return { text: `未知工具 ${name}。` };
+	const native = o.native?.find((t) => t.name === name);
+	if (native) {
+		try {
+			return await native.run(args, o.signal);
+		} catch (err) {
+			return { text: `${name} 执行出错：${err instanceof Error ? err.message : String(err)}`, isError: true };
+		}
+	}
 	if (name === "story_read") return storyRead(o.beats, args);
 	const spec = cardTools.find((s) => s.name === name && (s.surfaces.includes("assistant") || s.surfaces.includes("authoring")) && cardToolAvailable(s.name, deps));
 	if (spec) {
@@ -300,11 +330,14 @@ const botAssistantMessage = (text: string) => ({
 	model: "history",
 	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 });
-const botToolResult = (toolCallId: string, toolName: string, r: ToolRunResult) => ({
+const botToolResult = (toolCallId: string, toolName: string, r: BotToolResult) => ({
 	role: "toolResult",
 	toolCallId,
 	toolName,
-	content: [{ type: "text", text: r.text }],
+	content: [
+		...(r.text ? [{ type: "text", text: r.text }] : []),
+		...(r.images ?? []).map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType })),
+	],
 	isError: r.isError === true,
 	timestamp: 0,
 });
@@ -327,7 +360,7 @@ export interface BotLoopOptions {
 	/** 每轮视野块（装配期虚拟物；与用户话拼成同一条消息，注入在前） */
 	view: string;
 	tools: StageTool[];
-	execute: (name: string, args: Record<string, unknown>) => Promise<ToolRunResult>;
+	execute: (name: string, args: Record<string, unknown>) => Promise<BotToolResult>;
 	onDelta?: (kind: "text" | "thinking", delta: string) => void;
 	onActivity?: (detail: string) => void;
 	signal?: AbortSignal;
@@ -369,7 +402,7 @@ export async function runBotLoop(o: BotLoopOptions): Promise<{ text: string } | 
 		if (calls.length === 0) return { text };
 		for (const [i, call] of calls.entries()) {
 			const id = typeof call.id === "string" && call.id ? call.id : `bot-${round}-${i}`;
-			let result: ToolRunResult;
+			let result: BotToolResult;
 			try {
 				result = await o.execute(call.name!, call.arguments ?? {});
 			} catch (err) {

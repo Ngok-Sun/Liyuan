@@ -14,8 +14,8 @@ import { DraftStore, draftDirectory, listDrafts } from "./draft-store.ts";
 import { applyDraftRevisions, DRAFT_REVISION_TYPE } from "./draft-projection.ts";
 import { PreviousDraftEditor } from "./previous-draft.ts";
 import { projectToolContext } from "./context.ts";
-import { authoringHistory, authoringRequestIds, contextText, conversationMode, CONVERSATION_MODE_TYPE, CONVERSATION_PROCESS_TYPE, isConversationMode, roleplayHistory, type ConversationMode, type ContextMessage } from "../conversation-mode.ts";
-import { authoringTools, authoringSystemPrompt, runAuthoringTool, AUTHORING_NATIVE_TOOLS, CONVERSATION_MODE_TOOL } from "./authoring.ts";
+import { authoringHistory, authoringRequestIds, contextText, conversationMode, CONVERSATION_PROCESS_TYPE, type ConversationMode, type ContextMessage } from "../conversation-mode.ts";
+import { authoringTools, runAuthoringTool, AUTHORING_NATIVE_TOOLS } from "./authoring.ts";
 import { AGENT_ASK_TOOL, AGENT_SCREENSHOT_TOOL, agentSystemPrompt, buildAgentStateBlock } from "./agent.ts";
 import {
 	BOT_THREAD_REPLAY,
@@ -29,13 +29,14 @@ import {
 	readBotThread,
 	runBotLoop,
 	runBotTool,
+	type BotNativeTool,
 	type BotStreamFn,
 } from "./bot.ts";
 import { rulesAgentDir } from "../user-rules.ts";
 import { describeChange, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type ChangeSet } from "./story-history.ts";
 import { agentHistory, buildDiscussionSummaryPrompt, discussionTokens, DISCUSSION_SUMMARY_TYPE, livePromptTokens, MANUAL_MIN_DISCUSSION_TOKENS, planDiscussionCompaction, promptTokensOfMessages } from "./discussion.ts";
 import { readFileSync } from "node:fs";
-import { createSandboxGate, sandboxGrantsFromBranch, SANDBOX_GRANT_TYPE } from "../sandbox.ts";
+import { createSandboxGate, NATIVE_TOOL_ACCESS, sandboxGrantsFromBranch, SANDBOX_GRANT_TYPE } from "../sandbox.ts";
 import { fileChangeOf } from "../activity-format.ts";
 import type { CardDeps } from "../tools/card.ts";
 import type { GateInput } from "../tools/gate.ts";
@@ -193,7 +194,6 @@ export interface StageTurnEndInfo {
 }
 
 export interface StageEvents {
-	onModeChanged?: (mode: ConversationMode) => void;
 	onTurnStart?: () => void;
 	/** 流式增量（转 WS delta 帧；kind 对应正文/思考通道） */
 	/**
@@ -265,7 +265,22 @@ export interface StageAgentSession {
 	prompt(text: string, options: { expandPromptTemplates: false; reuseUserMessage: boolean }): Promise<void>;
 	abort(): Promise<void>;
 	appendMessage(message: unknown): string;
-	getAllTools(): Array<{ name: string }>;
+	getAllTools(): Array<{ name: string; description?: string; parameters?: unknown }>;
+	/**
+	 * pi 的注册工具定义（副编剧面的原生工具取它的描述/schema 并借它执行）。
+	 * 台前的原生工具由 pi 自己执行、梨园只上门禁，从不走这里——**这是副编剧专用的一条执行口**
+	 * （docs/PLAN-COMPANION-BOT §4.2 刀 2 前置：自建小循环拿不到 pi 的循环，就拿 pi 的工具）。
+	 * 未注册的名字返回 undefined。
+	 */
+	getToolDefinition?(name: string): {
+		description?: string;
+		parameters?: unknown;
+		execute(toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown): Promise<{
+			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+			details?: unknown;
+			isError?: boolean;
+		}>;
+	} | undefined;
 	setActiveToolsByName(names: string[]): void;
 	setTurnSystemPrompt(prompt: string): void;
 }
@@ -616,7 +631,7 @@ export const mergeFinalText = (draft: string, text: string): string => {
 export class StageEngine {
 	#deps: StageEngineDeps;
 	#busy = false;
-	#queue: Array<{ text: string; mode: ConversationMode; note?: string }> = [];
+	#queue: Array<{ text: string; note?: string }> = [];
 	#abort: AbortController | null = null;
 	/** 副编剧轮的独立中止（与台前各管各的；两者靠同一把 #busy 串行，互不打断） */
 	#botAbort: AbortController | null = null;
@@ -636,7 +651,11 @@ export class StageEngine {
 	#ctxOverride: { sessionId: string; tokens: number } | null = null;
 
 	/**
-	 * agent 是子项目属性（对话.json 的 mode），压过树上的 liyuan-mode 条目；扮演/工作仍由树上条目决定。
+	 * agent 是子项目属性（对话.json 的 mode），压过树上的 liyuan-mode 条目。
+	 *
+	 * 工作模式（authoring）2026-10-16 刀 2 退场：树上遗留的条目**照旧读得回来**
+	 * （conversationMode() 认得它，旧会话的显示分流与历史过滤不变），但引擎的运行视图一律按扮演走——
+	 * 入口已经全撤，旧会话打开就是接着演。
 	 */
 	get mode(): ConversationMode {
 		const sm = this.#deps.getSession().sessionManager;
@@ -645,20 +664,10 @@ export class StageEngine {
 			if (this.#chatMode?.sessionDir !== sessionDir) this.#chatMode = { sessionDir, mode: chatModeOfSessionDir(sessionDir) };
 			if (this.#chatMode.mode === "agent") return "agent";
 		}
-		return conversationMode(sm.getBranch() as BranchEntryLike[]);
+		const tree = conversationMode(sm.getBranch() as BranchEntryLike[]);
+		return tree === "authoring" ? "roleplay" : tree;
 	}
 	get turnMode(): ConversationMode | undefined { return this.#turnMode; }
-
-	setMode(mode: ConversationMode): void {
-		if (!isConversationMode(mode)) throw new Error("未知会话模式。");
-		if (this.#busy) throw new Error("请等当前回复完成（或先停止），再切换模式。");
-		if (this.mode === mode) return;
-		if (mode === "agent" || this.mode === "agent") throw new Error("agent 是子项目的形态，新建对话时选定，不在拍与拍之间切换。");
-		const sm = this.#deps.getSession().sessionManager;
-		sm.appendCustomEntry(CONVERSATION_MODE_TYPE, { mode, source: "user" });
-		sm.flush();
-		this.#deps.events?.onModeChanged?.(mode);
-	}
 
 	getWorkspaces(): TurnWorkspace[] {
 		const sm = this.#deps.getSession().sessionManager;
@@ -753,17 +762,17 @@ export class StageEngine {
 	 */
 	async performTurn(userText: string, directorNote?: string): Promise<void> {
 		if (this.#busy) {
-			this.#queue.push({ text: userText, mode: this.mode, ...(directorNote ? { note: directorNote } : {}) });
+			this.#queue.push({ text: userText, ...(directorNote ? { note: directorNote } : {}) });
 			return;
 		}
-		await this.#run(userText, this.mode, directorNote);
+		await this.#run(userText, directorNote);
 		await this.#drain();
 	}
 
 	/** 再生成：叶已钉在 user（swipe/reroll 已 branch），不追加 user 消息直接开演；directorNote 同 performTurn */
 	async regenerate(directorNote?: string): Promise<void> {
 		if (this.#busy) return;
-		await this.#run(null, this.mode, directorNote);
+		await this.#run(null, directorNote);
 		await this.#drain();
 	}
 
@@ -779,6 +788,9 @@ export class StageEngine {
 	 * 送模内容＝闭合集合（见 bot.ts 文件头）：卡级 APPEND_SYSTEM.md＋BOT.md＋每轮视野块＋线程＋工具回执。
 	 * 线程落 <子项目>/副编剧.jsonl——不进会话树、不进场记/摘要/记忆/压缩；主 agent 不知道它存在。
 	 * 与台前串行（同一把 #busy）；模型默认跟主演条目（既有注入，不新增链路）。
+	 *
+	 * 刀 2：原生七工具（read/write/edit/bash/grep/find/ls）经 session.getToolDefinition 借 pi 的实现执行，
+	 * 沙箱门在这里自己跑一遍（台上那道门挂在 pi 的 tool_call 钩子上，副编剧不经 pi 的循环）。
 	 */
 	async botTurn(
 		text: string,
@@ -794,7 +806,8 @@ export class StageEngine {
 		this.#botAbort = ac;
 		try {
 			const cwd = this.#deps.cwd;
-			const sm = this.#deps.getSession().sessionManager;
+			const session = this.#deps.getSession();
+			const sm = session.sessionManager;
 			const materials = loadStageMaterials(cwd);
 			const chatDir = chatDirOfSessionDir(sm.getSessionDir?.());
 			const cardDir = chatDir ? cardDirOfChatDir(chatDir) : null;
@@ -803,6 +816,7 @@ export class StageEngine {
 				cardAppend: materials.userRules.card,
 				persona: readBotPersona(cardDir, rulesAgentDir()),
 				macro,
+				env: `工作目录：${cwd}\n当前角色卡：${materials.config.card}`,
 			});
 			const branch = sm.getBranch() as BranchEntryLike[];
 			const rebuilt = rebuildHistory(branch, materials.promptRules);
@@ -810,10 +824,12 @@ export class StageEngine {
 			const view = buildBotView({ summary: rebuilt.summary, state: formatState(stateFromBranch(branch)), beats });
 			const file = botThreadPath(cwd, sm.getSessionDir?.(), sm.getSessionId());
 			const thread = readBotThread(file).slice(-BOT_THREAD_REPLAY);
-			// 卡族依赖＝读侧 ∪ 宿主 authoring 件（与工作模式/agent 模式同一条并法：
+			// 卡族依赖＝读侧 ∪ 宿主 authoring 件（与 agent 模式同一条并法：
 			// card_create/card_project 等只在 authoring 件里，缺了它们工具不上清单）
-			const deps: StageToolDeps = { ...this.#toolDeps(), ...this.#deps.authoring };
-			const tools = botTools(materials.config.language, deps);
+			const deps: StageToolDeps = { ...this.#toolDeps("bot"), ...this.#deps.authoring };
+			// backendControl 关＝用户没给通用工具（与台上、agent 模式同一开关、同一语义）
+			const native = materials.config.backendControl === false ? [] : this.#botNativeTools(session, ac);
+			const tools = botTools(materials.config.language, deps, native);
 			const { apiKey, headers } = await this.#deps.getAuth(model);
 			const r = await runBotLoop({
 				stream: this.#deps.sideStreamFn as unknown as BotStreamFn,
@@ -824,7 +840,7 @@ export class StageEngine {
 				userText: trimmed,
 				view,
 				tools,
-				execute: (name, args) => runBotTool({ deps, tools, name, args, language: materials.config.language, beats }),
+				execute: (name, args) => runBotTool({ deps, tools, native, name, args, language: materials.config.language, beats, signal: ac.signal }),
 				onDelta: o.onDelta,
 				onActivity: o.onActivity,
 				signal: ac.signal,
@@ -845,16 +861,70 @@ export class StageEngine {
 		}
 	}
 
+	/**
+	 * 副编剧的原生工具面（刀 2 前置）：pi 的原生七工具照抄它的描述/schema，执行借它的实现
+	 * （`session.getToolDefinition`）——梨园不包第二层。
+	 *
+	 * 沙箱门在这里自己关一遍：台上那道门挂在 pi 的 tool_call 钩子上，副编剧的循环不经过 pi。
+	 * 用的是**同一份** createSandboxGate 与同一份授权数据（本会话授权在会话树上、永久授权在 卡.json），
+	 * 所以「卡目录为界、卡外问用户」这条边界对副编剧与台上逐字同义。
+	 */
+	#botNativeTools(session: StageAgentSession, ac: AbortController): BotNativeTool[] {
+		const getDef = session.getToolDefinition?.bind(session);
+		if (!getDef) return [];
+		const cwd = this.#deps.cwd;
+		const sm = session.sessionManager;
+		const materials = loadStageMaterials(cwd);
+		const chatDir = chatDirOfSessionDir(sm.getSessionDir?.());
+		const gate = createSandboxGate({
+			cwd,
+			config: materials.config,
+			chatDir: chatDir ?? undefined,
+			sessionGrants: () => sandboxGrantsFromBranch(sm.getBranch() as BranchEntryLike[]),
+			rememberSession: (grant) => { sm.appendCustomEntry(SANDBOX_GRANT_TYPE, grant); sm.flush(); },
+			ask: this.#deps.askUser ? (question, options) => this.#deps.askUser!(question, options, ac.signal) : undefined,
+			onStop: () => ac.abort(),
+			log: (line) => console.error(`[bot] sandbox ${line}`),
+		});
+		const infos = new Map(session.getAllTools().map((t) => [t.name, t]));
+		const out: BotNativeTool[] = [];
+		for (const name of AUTHORING_NATIVE_TOOLS) {
+			const def = getDef(name);
+			const info = infos.get(name);
+			if (!def || !info) continue;
+			out.push({
+				name,
+				mode: NATIVE_TOOL_ACCESS[name as keyof typeof NATIVE_TOOL_ACCESS] === "read" ? "read" : "write",
+				description: info.description ?? def.description ?? name,
+				parameters: (info.parameters ?? def.parameters ?? { type: "object", properties: {} }) as Record<string, unknown>,
+				run: async (args, signal) => {
+					const blocked = await gate(name, args);
+					if (blocked) return { text: blocked, isError: true };
+					try {
+						const r = await def.execute(`bot-${name}-${Date.now()}`, args, signal ?? ac.signal, undefined, undefined);
+						const text = r.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+						const images = r.content
+							.filter((c) => c.type === "image" && c.data && c.mimeType)
+							.map((c) => ({ data: c.data!, mimeType: c.mimeType! }));
+						return { text, ...(images.length > 0 ? { images } : {}), ...(r.isError ? { isError: true } : {}) };
+					} catch (err) {
+						return { text: `${name} 执行出错：${err instanceof Error ? err.message : String(err)}`, isError: true };
+					}
+				},
+			});
+		}
+		return out;
+	}
+
 	async #drain(): Promise<void> {
 		while (this.#queue.length > 0 && !this.#busy) {
 			const next = this.#queue.shift();
-			if (next !== undefined) await this.#run(next.text, next.mode, next.note);
+			if (next !== undefined) await this.#run(next.text, next.note);
 		}
 	}
 
-	async #run(userText: string | null, requestedMode = this.mode, directorNote?: string): Promise<void> {
+	async #run(userText: string | null, directorNote?: string): Promise<void> {
 		const ev = this.#deps.events ?? {};
-		if (requestedMode !== this.mode) this.setMode(requestedMode);
 		this.#busy = true;
 		this.#turnMode = this.mode;
 		this.#abort = new AbortController();
@@ -881,11 +951,9 @@ export class StageEngine {
 		const { cwd, events: rawEv = {} } = this.#deps;
 		const session = this.#deps.getSession();
 		const sm = session.sessionManager;
-		let mode = this.mode;
-		// agent 轮＝工作模式那条 pi 会话路（原始过程回放、沙箱内原生工具）＋稿子工具＋项目状态块（docs/PLAN-AGENT-MODE.md §四）
+		const mode = this.mode;
+		// agent 轮＝原始过程回放、沙箱内原生工具、稿子工具、项目状态块（docs/PLAN-AGENT-MODE.md §四）
 		const agentTurn = mode === "agent";
-		let authoringTurn = mode === "authoring" || agentTurn;
-		let modeExit = false;
 		const connection = getStageConnection(sm.getSessionId());
 		if (!connection) throw new Error("RP 扩展尚未绑定当前 pi 会话。");
 		const chatDir = chatDirOfSessionDir(sm.getSessionDir?.());
@@ -934,15 +1002,7 @@ export class StageEngine {
 			...(userText !== null ? [{ type: "message", message: nowMsg(userText) }] : []),
 		] as BranchEntryLike[];
 		const state = stateFromBranch(branch);
-		const { history: storyHistory, lastNarrativeText, summary } = rebuildHistory(branch, materials.promptRules);
-		// 无缝模式（9/11 定案）：维护性的输入/输出在扮演上下文里也可见——带标记的外围消息，
-		// 不进 story 流（rebuildHistory 内的 storyBranch 已滤），持久化隔离不变。
-		// 位置：插在剧情流**之前**——末端 user 消息是「本拍输入挂在数据块之后」的装配锚点，
-		// 维护段排在它后面会被并进末端注入块（9/11 实弹：RETURN_REQUEST 被世界状态块吞掉）。
-		const maintenance = authoringTurn ? [] : roleplayHistory(sm.getBranch() as BranchEntryLike[]).map((m) => ({
-			role: m.role as "user" | "assistant", text: (m.content as Array<{ type?: string; text?: string }>)[0]?.text ?? "",
-		})).filter((m) => m.text);
-		const history = [...maintenance, ...storyHistory];
+		const { history, lastNarrativeText, summary } = rebuildHistory(branch, materials.promptRules);
 		const lastUserText = userText ?? contextText([...branch].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.message?.content);
 		if (!lastUserText.trim()) {
 			ev.onNotify?.("error", "没有可开演的用户输入。");
@@ -952,8 +1012,8 @@ export class StageEngine {
 		const languageMismatch = lastNarrativeText
 			? detectsLanguageMismatch(lastNarrativeText, config.language)
 			: false;
-		// 关键词扫描只看剧情流：维护文本不该触发世界书绿灯
-		const windowText = storyHistory
+		// 关键词扫描只看剧情流
+		const windowText = history
 			.slice(-config.scanDepth)
 			.map((m) => m.text)
 			.join("\n");
@@ -1008,7 +1068,6 @@ export class StageEngine {
 		// P7：ask 工具依赖宿主注入 askUser（选择卡通道）；未注入则从清单剔除
 		const askEnabled = !!this.#deps.askUser;
 		const rpTools: StageTool[] = [
-			CONVERSATION_MODE_TOOL,
 			...stageTools(config.language, readDeps),
 			...(skillList.length > 0 ? [skillReadTool(config.language, skillList)] : []),
 			...writeTools(config.language).filter((t) => t.name !== "ask" || askEnabled),
@@ -1016,8 +1075,6 @@ export class StageEngine {
 			...mcpTools,
 		];
 		const cardDeps: CardDeps = { ...readDeps, ...this.#deps.authoring };
-		const workTools: StageTool[] = [CONVERSATION_MODE_TOOL, ...authoringTools(config.language, cardDeps),
-			...(skillList.length ? [skillReadTool(config.language, skillList)] : []), ...mcpTools];
 		const nativeNames = config.backendControl === false ? [] : session.getAllTools().map((t) => t.name).filter((n) => AUTHORING_NATIVE_TOOLS.includes(n));
 		// agent 模式清单（docs/PLAN-AGENT-CODING.md §五）＝扮演数据工具中与树无关的（世界线是树分支，不给）∪ skill_read ∪ ask
 		// ∪ 媒体 ∪ MCP ∪ 写卡工具 ∪ 原生七工具；稿子就用原生 read/grep/edit/write。排在最前：同名工具（ask）以 agent 版定义为准。
@@ -1031,12 +1088,9 @@ export class StageEngine {
 			...authoringTools(config.language, cardDeps),
 		] : [];
 		const rpNames = rpTools.map((t) => t.name);
-		const workNames = [...new Set([...workTools.map((t) => t.name), ...nativeNames])];
 		const agentNames = [...new Set([...agentTools.map((t) => t.name), ...nativeNames])];
-		const tools = [...new Map([...agentTools, ...rpTools, ...workTools].map((t) => [t.name, t])).values()];
-		const workPrompt = agentTurn
-			? agentSystemPrompt({ cwd, cardPath: config.card, storyDir: storyDir!, userRules: materials.userRules, cardAgents: materials.cardAgents, macro: { charName: card.name, userName: config.userName } })
-			: authoringSystemPrompt(cwd, config.card);
+		const tools = [...new Map([...agentTools, ...rpTools].map((t) => [t.name, t])).values()];
+		const agentPrompt = agentSystemPrompt({ cwd, cardPath: config.card, storyDir: storyDir!, userRules: materials.userRules, cardAgents: materials.cardAgents, macro: { charName: card.name, userName: config.userName } });
 		const ws = createWorkspace({ sessionId: sm.getSessionId(), parentId: sm.getLeafId(),
 			...(userText === null ? { userId: [...branch].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.id } : {}) });
 		const draftStore = new DraftStore(draftDirectory(cwd, sm.getSessionDir?.(), sm.getSessionId()), ws.id);
@@ -1049,12 +1103,12 @@ export class StageEngine {
 			persist: (next) => draftStore.write(next),
 			reload: () => draftStore.read(),
 		};
-		this.#workspace = authoringTurn ? undefined : { ws, deps: wsDeps };
-		if (!authoringTurn) { draftStore.write(ws); ev.onWorkspace?.(ws); }
+		this.#workspace = agentTurn ? undefined : { ws, deps: wsDeps };
+		if (!agentTurn) { draftStore.write(ws); ev.onWorkspace?.(ws); }
 
 		// 【剧情记忆】被动召回：向量库注入侧。旁路调用必须带超时——provider 抽风时单次能卡
 		// 几百秒，扮演不能陪着干等；拿不到就当没有，这一拍不出该块。
-		const memoryRecall = authoringTurn ? undefined : await this.#recallForBeat(sm.getSessionId(), lastUserText);
+		const memoryRecall = agentTurn ? undefined : await this.#recallForBeat(sm.getSessionId(), lastUserText);
 
 		const systemPrompt = buildStageSystemPrompt({
 			card,
@@ -1093,7 +1147,7 @@ export class StageEngine {
 		// 两者语义同为「更早剧情的既定事实」，本局摘要在前、往局记忆在后。摘要是数据块，
 		// 走既有通道与既有语义句（铁律一/二：零新增文案、零新增注入点）；预算在 card-memory。
 		// authoring 与 agent 模式下每个子项目是独立工程，绝不引入卡级跨项目常驻摘要。
-		const residentSummary = authoringTurn ? undefined : this.#residentSummary(sm, summary, state, rosterIndex);
+		const residentSummary = agentTurn ? undefined : this.#residentSummary(sm, summary, state, rosterIndex);
 		// agent 模式的项目状态块（docs/PLAN-AGENT-CODING.md §六）：与扮演同一份数据，多带稿子目录（不带正文）；每次装配现读目录。
 		const agentStateBlock = (): string => buildAgentStateBlock({ state, rosterIndex, summary, residentSummary, files: listStoryFiles(storyDir!) });
 
@@ -1173,7 +1227,7 @@ export class StageEngine {
 
 		const { apiKey, headers } = await this.#deps.getAuth(model);
 		if (this.#abort?.signal.aborted) {
-			if (userText !== null) session.appendMessage({ ...nowMsg(userText), ...(authoringTurn ? { details: { liyuanMode: "authoring" } } : {}) });
+			if (userText !== null) session.appendMessage({ ...nowMsg(userText), ...(agentTurn ? { details: { liyuanMode: "agent" } } : {}) });
 			sm.flush();
 			return { aborted: true };
 		}
@@ -1197,7 +1251,7 @@ export class StageEngine {
 		const publish = () => ev.onWorkspace?.(structuredClone(ws));
 		let lastCheckpoint = 0;
 		const checkpoint = (force = false) => {
-			if (authoringTurn) return;
+			if (agentTurn) return;
 			if (force || Date.now() - lastCheckpoint > 250) {
 				commitWorkspace(ws, wsDeps, structuredClone(ws)); lastCheckpoint = Date.now(); publish();
 			}
@@ -1206,7 +1260,7 @@ export class StageEngine {
 		const agentMedia: Array<{ toolName: string; toolCallId: string; details: Record<string, unknown>; text: string }> = [];
 		const requestId = () => ws.userId ??= [...sm.getBranch() as BranchEntryLike[]].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.id;
 		const finishAuthoring = (): StageTurnEndInfo => {
-			const aborted = this.#abort?.signal.aborted === true || (!modeExit && final?.stopReason === "aborted");
+			const aborted = this.#abort?.signal.aborted === true || final?.stopReason === "aborted";
 			const liyuanMode = agentTurn ? "agent" : "authoring";
 			const timeline: TurnWorkspace["timeline"] = [];
 			for (const m of exchanges) {
@@ -1224,7 +1278,6 @@ export class StageEngine {
 			const entryId = final && (body || timeline.length) ? session.appendMessage({ ...final,
 				content: [{ type: "text", text: body }],
 				details: { liyuanMode, liyuanAuthoringReply: true, rpTimeline: timeline },
-				...(modeExit ? { stopReason: "stop" } : {}),
 			}) : undefined;
 			sm.flush();
 			// 媒体交付落树（与扮演同一条：wire 只认树上的 toolResult 出媒体帧）
@@ -1232,35 +1285,33 @@ export class StageEngine {
 				for (const d of agentMedia) session.appendMessage({ role: "toolResult", toolName: d.toolName, toolCallId: d.toolCallId, content: [{ type: "text", text: d.text }], details: d.details, isError: false, timestamp: Date.now() });
 				sm.flush();
 			}
-			if (errored && !aborted) ev.onNotify?.("error", `${agentTurn ? "本轮" : "写卡"}失败：${errored}`);
+			if (errored && !aborted) ev.onNotify?.("error", `本轮失败：${errored}`);
 			return { mode: liyuanMode, aborted, entryId, ...(errored ? { error: errored } : {}) };
 		};
 
 		const finish = async (): Promise<StageTurnEndInfo> => {
 			// 本拍的真实 usage 即将成为新的事实：上一拍压缩留下的折算值到此作废
 			this.#ctxOverride = null;
-			if (authoringTurn) {
+			if (agentTurn) {
 				const info = finishAuthoring();
-				if (agentTurn) {
-					// 轮末落检查点（docs/PLAN-AGENT-CODING.md §4.2）：正文/ 有改动才落；纯讨论一轮什么都不发生。
-					const turnId = requestId();
-					const message = `${lastUserText.replace(/\s+/g, " ").trim().slice(0, 60)}${info.aborted ? "（已中止）" : ""}`;
-					let checkpoint: ReturnType<StoryHistory["commit"]>;
-					try { checkpoint = new StoryHistory(chatDir!).commit({ author: "agent", message, ...(turnId ? { turnId } : {}), ...(info.aborted ? { aborted: true } : {}) }); }
-					catch (err) { ev.onNotify?.("warning", `稿子检查点未落下：${err instanceof Error ? err.message : String(err)}`); }
-					if (checkpoint) {
-						const { files: _files, ...lite } = checkpoint;
-						sm.appendCustomEntry(STORY_CHECKPOINT_TYPE, lite);
-						sm.flush();
-						const added = checkpoint.changed.added.map((name) => { try { return { name, text: readFileSync(join(storyDir!, name), "utf8") }; } catch { return { name, text: "" }; } }).filter((f) => f.text.trim());
-						info.checkpoint = { id: checkpoint.id, changed: checkpoint.changed, added };
-						ev.onActivity?.(`已保存检查点：${describeChange(checkpoint.changed)}`);
-						// 旁路链挂在检查点上（§七）：场记只对新增文件跑；前情压缩按文件、按字数到期。
-						await this.#afterCheckpoint({ model, auth: { apiKey, headers }, materials, sm, ev, added, aborted: info.aborted, storyDir: storyDir! });
-					}
-					// 讨论层压缩（§六.3）：估算超过窗口才压，与正文无关；失败只记日志。
-					if (!info.aborted) await this.#compactDiscussion(model, { apiKey, headers }, sm, ev);
+				// 轮末落检查点（docs/PLAN-AGENT-CODING.md §4.2）：正文/ 有改动才落；纯讨论一轮什么都不发生。
+				const turnId = requestId();
+				const message = `${lastUserText.replace(/\s+/g, " ").trim().slice(0, 60)}${info.aborted ? "（已中止）" : ""}`;
+				let checkpoint: ReturnType<StoryHistory["commit"]>;
+				try { checkpoint = new StoryHistory(chatDir!).commit({ author: "agent", message, ...(turnId ? { turnId } : {}), ...(info.aborted ? { aborted: true } : {}) }); }
+				catch (err) { ev.onNotify?.("warning", `稿子检查点未落下：${err instanceof Error ? err.message : String(err)}`); }
+				if (checkpoint) {
+					const { files: _files, ...lite } = checkpoint;
+					sm.appendCustomEntry(STORY_CHECKPOINT_TYPE, lite);
+					sm.flush();
+					const added = checkpoint.changed.added.map((name) => { try { return { name, text: readFileSync(join(storyDir!, name), "utf8") }; } catch { return { name, text: "" }; } }).filter((f) => f.text.trim());
+					info.checkpoint = { id: checkpoint.id, changed: checkpoint.changed, added };
+					ev.onActivity?.(`已保存检查点：${describeChange(checkpoint.changed)}`);
+					// 旁路链挂在检查点上（§七）：场记只对新增文件跑；前情压缩按文件、按字数到期。
+					await this.#afterCheckpoint({ model, auth: { apiKey, headers }, materials, sm, ev, added, aborted: info.aborted, storyDir: storyDir! });
 				}
+				// 讨论层压缩（§六.3）：估算超过窗口才压，与正文无关；失败只记日志。
+				if (!info.aborted) await this.#compactDiscussion(model, { apiKey, headers }, sm, ev);
 				return info;
 			}
 			const aborted = userStopped || this.#abort?.signal.aborted === true || final?.stopReason === "aborted";
@@ -1421,14 +1472,13 @@ export class StageEngine {
 		});
 
 		const hooks: StageHooks = {
-			get mode() { return mode; },
-			get systemPrompt() { return authoringTurn ? workPrompt : systemPrompt; },
-			get toolNames() { return modeExit ? [] : mode === "agent" ? agentNames : mode === "authoring" ? workNames : rpNames; },
+			get systemPrompt() { return agentTurn ? agentPrompt : systemPrompt; },
+			get toolNames() { return mode === "agent" ? agentNames : rpNames; },
 			context: (piMessages) => {
 				// 历史/状态/预设/记忆只有这一份出口；本拍新增的工具过程仍由 pi 持有。
 				contextStart ??= piMessages.length;
 				ws.userId ??= [...sm.getBranch() as Array<{ id: string; type: string; message?: { role?: string } }>].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.id;
-				if (authoringTurn) {
+				if (agentTurn) {
 					// agent：讨论历史认讨论摘要（docs/PLAN-AGENT-CODING.md §六.3）；项目状态块压在本轮用户原话之前（同扮演「数据块之后才是提问」的装配锚点）
 					const history = agentTurn ? agentHistory(sm.getBranch() as BranchEntryLike[]) : authoringHistory(applyDraftRevisions(sm.getBranch() as BranchEntryLike[]));
 					if (agentTurn) prependToLastUser(history, agentStateBlock());
@@ -1448,7 +1498,7 @@ export class StageEngine {
 				});
 			},
 			update: (event) => {
-				if (authoringTurn) {
+				if (agentTurn) {
 					if ((event.type === "text_delta" || event.type === "thinking_delta") && event.delta) ev.onDelta?.(event.type === "text_delta" ? "text" : "thinking", event.delta);
 					return;
 				}
@@ -1474,7 +1524,7 @@ export class StageEngine {
 				}
 			},
 			messageEnd: (message) => {
-				if (message.role === "user" && authoringTurn) message.details = { ...(message.details as object ?? {}), liyuanMode: agentTurn ? "agent" : "authoring" };
+				if (message.role === "user" && agentTurn) message.details = { ...(message.details as object ?? {}), liyuanMode: "agent" };
 				if (message.role !== "assistant" && message.role !== "toolResult") return undefined;
 				const raw = structuredClone(message) as ContextMessage;
 				exchanges.push(raw);
@@ -1482,7 +1532,7 @@ export class StageEngine {
 				if (userId) { sm.appendCustomEntry(CONVERSATION_PROCESS_TYPE, { requestId: userId, mode, message: raw }); sm.flush(); }
 				if (message.role === "assistant") {
 					final = message as AssistantMsgLike;
-					if (authoringTurn) {
+					if (agentTurn) {
 						if (final.stopReason === "error") errored = final.errorMessage || "provider error";
 						return { persist: false };
 					}
@@ -1525,7 +1575,7 @@ export class StageEngine {
 			toolCall: async (name, input) => {
 				blog("tool_call", `${name}: ${JSON.stringify(input)}`);
 				let blockReason = !hooks.toolNames.includes(name) ? "此工具在当前会话模式不可用。" :
-					name === CONVERSATION_MODE_TOOL.name || authoringTurn ? undefined : workspaceToolBlock(ws, name, tools.find((t) => t.name === name)?.mode);
+					agentTurn ? undefined : workspaceToolBlock(ws, name, tools.find((t) => t.name === name)?.mode);
 				if (!blockReason && nativeNames.includes(name)) blockReason = await sandboxGate(name, input);
 				return { toolName: name, lastUserText, creationMode: loadStageConfig(cwd).creationMode, ...(blockReason ? { blockReason } : {}) };
 			},
@@ -1533,10 +1583,7 @@ export class StageEngine {
 				blog("tool_result", `${name}: ${content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("")}`);
 			},
 			turnEnd: (withdrawTools) => {
-				if (authoringTurn) {
-					if (modeExit) { withdrawTools(); void session.abort(); }
-					return;
-				}
+				if (agentTurn) return;
 				const calls = final?.content.filter((block) => block.type === "toolCall") ?? [];
 				if (calls.length && final?.stopReason !== "aborted" && !userStopped && !this.#abort?.signal.aborted) {
 					delete ws.preview;
@@ -1569,24 +1616,8 @@ export class StageEngine {
 				}
 			},
 			execute: async (name, id, input, signal) => {
-				if (name === CONVERSATION_MODE_TOOL.name) {
-					if (!isConversationMode(input.mode)) return { content: [{ type: "text", text: "mode 必须为 roleplay 或 authoring。" }], isError: true };
-					if (input.mode === mode) return { content: [{ type: "text", text: `当前已是 ${mode} 模式。` }] };
-					mode = input.mode;
-					authoringTurn = true;
-					this.#turnMode = "authoring";
-					this.#workspace = undefined;
-					modeExit = mode === "roleplay";
-					sm.appendCustomEntry(CONVERSATION_MODE_TYPE, { mode, source: "agent", requestId: requestId() });
-					sm.flush();
-					session.setActiveToolsByName(hooks.toolNames);
-					if (!modeExit) session.setTurnSystemPrompt(workPrompt);
-					ev.onStreamClear?.();
-					ev.onModeChanged?.(mode);
-					return { content: [{ type: "text", text: modeExit ? "已切回扮演，维护操作结束；下一条用户输入继续剧情。" : "已进入工作模式；下一次模型调用可见本会话完整操作记录与工作工具。" }], ...(modeExit ? { terminate: true } : {}) };
-				}
-				if (authoringTurn) {
-					if (agentTurn && name === "ask" && this.#deps.askUser) {
+				if (agentTurn) {
+					if (name === "ask" && this.#deps.askUser) {
 						const question = String(input.question ?? "").trim() || "请你定夺";
 						const options = Array.isArray(input.options) ? input.options.map((v) => String(v).trim()).filter(Boolean) : [];
 						const answer = await this.#deps.askUser(question, options, signal);
@@ -1651,7 +1682,7 @@ export class StageEngine {
 			return endInfo;
 		} finally {
 			release();
-			if (authoringTurn) await this.#deps.afterAuthoringTurn?.();
+			if (agentTurn) await this.#deps.afterAuthoringTurn?.();
 		}
 	}
 
@@ -2002,10 +2033,15 @@ export class StageEngine {
 
 
 	/**
-	 * 台上工具的执行依赖（每次取用现读素材/账本——工具看到的世界与装配同源）。
+	 * 台上/幕后工具的执行依赖（每次取用现读素材/账本——工具看到的世界与装配同源）。
 	 * 写入许可统一由 RP 扩展的 tool_call 钩子判断。
+	 *
+	 * side＝"stage"（默认，扮演与 agent 两个视图共用）：**不注入世界书写族与记忆写族**。
+	 * 写「用户的持久资料」是幕后的事（docs/PLAN-COMPANION-BOT.md §二）——撤依赖＝那几件工具
+	 * 按既有的 availableSpecs 机制自然下架，不新增名单、不加过滤分支。
+	 * side＝"bot"：副编剧面，两族照旧全给（能力改嫁，不是消失）。
 	 */
-	#toolDeps(): StageToolDeps {
+	#toolDeps(side: "stage" | "bot" = "stage"): StageToolDeps {
 		const cwd = this.#deps.cwd;
 		const sm = this.#deps.getSession().sessionManager;
 		/** 台上补充设定集路径（写侧落点；卡未装载时为空＝无 lorebook_write） */
@@ -2022,6 +2058,13 @@ export class StageEngine {
 		};
 		// 世界书写侧宿主件：给出则全族可用（含用户的书），不给则退回「只写补充设定集」的旧行为
 		const lh = this.#deps.loreHost;
+		const writeLore: StageToolDeps["writeLore"] = lh
+			? lh.write
+			: (input) => {
+					const overlay = overlayOf();
+					if (!overlay) return null;
+					return appendOverlayEntry(overlay, input);
+				};
 		return {
 			searchLore: (query, limit) => {
 				const m = loadStageMaterials(cwd);
@@ -2030,26 +2073,18 @@ export class StageEngine {
 				const marked = lh?.listMarked() as Array<LorebookEntry & { source?: string }> | undefined;
 				return hits.map((h) => ({ ...h, entry: { ...h.entry, source: marked?.find((e) => loreFingerprint(e.content) === loreFingerprint(h.entry.content))?.source } }));
 			},
-			// ---- M-D2 写侧 / M-D7 改删与书一级：有宿主件走宿主件，否则退回 overlay ----
-			writeLore: lh
-				? lh.write
-				: (input) => {
-						const overlay = overlayOf();
-						if (!overlay) return null;
-						return appendOverlayEntry(overlay, input);
-					},
+			// ---- 世界书读侧与书一级（列举/挂载/启停）：两视图都可用 ----
 			listLore: lh ? lh.listMarked : () => loadStageMaterials(cwd).entries,
-			...(lh
-				? {
-						updateLore: lh.update,
-						deleteLore: (fp: string) => lh.remove(fp),
-						listBooks: lh.listBooks,
-						createBook: lh.createBook,
-						mountBook: lh.mountBook,
-					}
-				: {}),
+			...(lh ? { listBooks: lh.listBooks, mountBook: lh.mountBook } : {}),
 			fingerprint: loreFingerprint,
 			...(this.#deps.setDisabledLore ? { toggleLore: this.#deps.setDisabledLore } : {}),
+			// ---- 世界书写族（write / update / delete / create）：幕后专属 ----
+			...(side === "bot"
+				? {
+						writeLore,
+						...(lh ? { updateLore: lh.update, deleteLore: (fp: string) => lh.remove(fp), createBook: lh.createBook } : {}),
+					}
+				: {}),
 			searchMemory: async (query) => {
 				const search = this.#deps.searchMemory;
 				let result: MemorySearchResult;
@@ -2065,21 +2100,23 @@ export class StageEngine {
 			},
 			...(this.#deps.readMemory || (cardDir && this.mode !== "agent") ? { readMemory: (ref: string) => ref.startsWith("card:")
 				? cardDir ? readCardMemory(cardDir, ref, chatId) : undefined : this.#deps.readMemory?.(sm.getSessionId(), ref) } : {}),
-			...(cardDir && this.mode !== "agent" ? { updateMemory: (ref: string, version: string, content: string) => changeCardMemory(cardDir, ref, version, content)! } : {}),
-			// ---- M-D3 向量库写侧：scope 由宿主绑定，模型只给内容（作用域不经模型） ----
-			...(this.#deps.addMemory
-				? { addMemory: (input: { text: string; title?: string }) => this.#deps.addMemory!(sm.getSessionId(), input) }
-				: {}),
 			...(this.#deps.listMemory || (cardDir && this.mode !== "agent")
 				? { listMemory: (storeId: string) => storeId === "card" ? (cardDir ? listCardMemory(cardDir, chatId).map((d) => ({ ...d, id: d.ref })) : []) : this.#deps.listMemory?.(sm.getSessionId(), storeId) ?? [] }
 				: {}),
-			...(this.#deps.deleteMemory || cardDir
-				? { deleteMemory: (storeId: string, id: string, version?: string) => {
-					if (storeId !== "card") return this.#deps.deleteMemory?.(sm.getSessionId(), storeId, id) ?? false;
-					if (!cardDir) return false;
-					changeCardMemory(cardDir, id, version ?? ""); return true;
-				} }
-				: {}),
+			// ---- 记忆写族（add / update / delete）：幕后专属 ----
+			...(side === "bot" ? {
+				...(cardDir && this.mode !== "agent" ? { updateMemory: (ref: string, version: string, content: string) => changeCardMemory(cardDir, ref, version, content)! } : {}),
+				...(this.#deps.addMemory
+					? { addMemory: (input: { text: string; title?: string }) => this.#deps.addMemory!(sm.getSessionId(), input) }
+					: {}),
+				...(this.#deps.deleteMemory || cardDir
+					? { deleteMemory: (storeId: string, id: string, version?: string) => {
+						if (storeId !== "card") return this.#deps.deleteMemory?.(sm.getSessionId(), storeId, id) ?? false;
+						if (!cardDir) return false;
+						changeCardMemory(cardDir, id, version ?? ""); return true;
+					} }
+					: {}),
+			} : {}),
 			// ---- M-D4 角色库：读卡面 / M-D7 改卡（改的是用户的卡文件，宿主负责热重载） ----
 			readCard: () => {
 				const m = loadStageMaterials(cwd);

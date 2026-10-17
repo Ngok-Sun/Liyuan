@@ -62,7 +62,7 @@
 
 | 文件 | 动作 |
 |---|---|
-| `src/conversation-mode.ts` | **authoring 降为历史态**：值保留（旧会话要读得回来），入口全撤；`roleplayHistory` 的【写卡维护】维护段退场（新旧会话一律不再进台前上下文；世界数据不受影响）；`authoringHistory`（原始回放）退场 |
+| `src/conversation-mode.ts` | **authoring 降为历史态**：值保留（旧会话要读得回来），入口全撤；`roleplayHistory` 的【写卡维护】维护段退场（新旧会话一律不再进台前上下文；世界数据不受影响）；~~`authoringHistory` 退场~~ → **2026-10-17 刀 2 实查：留**（agent 讨论层在用，见 §九） |
 | `src/stage/engine.ts` | `setMode` 去 authoring 目标；rpTools 去 CONVERSATION_MODE_TOOL；workTools / workPrompt 分支删；`#turnMode` 的 authoring 置位删 |
 | `src/stage/authoring.ts` | CONVERSATION_MODE_TOOL 删、authoringSystemPrompt 删；authoringTools / runAuthoringTool **留**（agent 模式与 bot 继续消费 card 族） |
 | `assets/AUTHORING.md` | 删；全局/卡级 AUTHORING 覆盖槽退场（用户文件不动，不再被读） |
@@ -77,7 +77,8 @@ Web 侧（刀 3）：顶栏开关删、conversation_mode 帧处理删、【写�
 ### 4.1 装配（送模内容＝闭合集合，声明在此）
 
 ```
-system   [卡级 APPEND_SYSTEM.md（宏展开）] → [BOT.md（卡级覆盖 ‖ 全局默认；宏展开）]
+system   [卡级 APPEND_SYSTEM.md（宏展开）] → [环境事实：工作目录／当前角色卡]
+         → [BOT.md（卡级覆盖 ‖ 全局默认；宏展开）]
 messages [每轮视野块（装配期虚拟物）：【前情提要】＋【世界状态】＋【最近 K 拍】]
          与用户这轮消息拼成同一条 user 消息（注入在前、原话最后）
          ＋ [bot 线程（只存用户原话与 bot 回复）]
@@ -95,6 +96,7 @@ messages [每轮视野块（装配期虚拟物）：【前情提要】＋【世�
 - **读**：lorebook_search / read / list / files、memory_search / read / list、card_read、world_state_get、panel_read、**story_read（新）**、MCP（用户自配的检索类 MCP 正是考据要用的；先挂上观察）。
 - **写**：lorebook_write / update / delete / create / toggle / mount、memory_add / update / delete、card_update、card_create / card_list / card_greetings / card_project、原生七工具（沙箱）。
   > 2026-10-16 刀 1 修正：**原生七工具暂缓**——自建小循环拿不到 pi 原生工具的执行上下文（`ToolDefinition.execute` 要 ExtensionContext），刀 1 的 bot 面＝资料工具；文件工具的接法单独立项，**必须在刀 2（工作模式拆除）前落地**，否则代码级维护无处可去。
+  > 2026-10-17 刀 2 **已落**：ctx 其实缺省可用（只有 read 的 `ctx?.model` 与 bash 的 `exposeSessionEnvironment` 看它，都是可缺省项），故借 `session.getToolDefinition(name)` 执行，沙箱门在引擎里用同一份 `createSandboxGate` 自己关。见 §九。
 - **不给**：draft 族（不写正文）、ask、conversation_mode（退场）、worldline 族（用户点名不给 agent）、panel_write / close、媒体（tts / show_html——演出交付）。
 - `story_read` 形态：按拍读（`from` / `count`），返回用户输入＋正文成对；默认视野只给最近 K 拍，工具用于读更早。
 - 边界全部由工具面执行；提示词只写「它是谁、怎么说话」。
@@ -148,7 +150,7 @@ messages [每轮视野块（装配期虚拟物）：【前情提要】＋【世�
 
 ### 刀 2（拆除＋权限限制，引擎侧；**必须在刀 1 验收后**）
 
-见 §二、§三。
+见 §二、§三；外加**原生七工具接法**（刀 2 前置，见 §4.2 注）。
 
 实弹：
 
@@ -186,6 +188,7 @@ bot 抽屉 / 浮窗（TG/QQ bot 形态）、线程渲染与流式、历史加载
 4. 命名：产品名（副编剧？）与文件名（BOT.md？）。
 5. K 拍窗口默认值（8）。
 6. 发布节奏：刀 1＋2 同版本发（能力先有家再拆旧家）；刀 3 可随后。
+   - **2026-10-17 注意**：刀 2 落地后，Web 顶栏「扮演｜工作」成了死按钮（点了没反应）——**刀 3 落地前不宜发版**，或先单独把那个开关摘掉。
 
 ## 九、状态
 
@@ -202,3 +205,29 @@ bot 抽屉 / 浮窗（TG/QQ bot 形态）、线程渲染与流式、历史加载
     5. **隔离**（抓包＋树核）：副编剧请求 system＝BOT.md（491 字，**不含**台上拍法／卡 AGENTS；本卡无卡级 APPEND 故空段跳过）；台前请求（38 工具）**零副编剧文本**、system 无「副编剧」；会话树 0 条副编剧文字（「乌篷船」仅出现在台前自己的检索过程里）；副编剧工具面 21 件含 story_read／lorebook 写族／card_update，**无** worldline 族、无 draft 族；视野块与用户话同条消息（注入在前、原话最后）。
     6. **线程**：`<子项目>/副编剧.jsonl` 6 条（三问三答，只存原话与回复）；第二轮请求带第一轮对话。
   - 观察（实弹）：副编剧思考里出现过一次无关的「往局记忆」串味（card 级记忆在视野工具结果里），最终答复不受影响——记录，不处理。
+
+- 2026-10-17 **刀 2 落地（工作模式拆除＋主 agent 权限限制＋原生七工具接法），实弹验收全过（未提交）**。
+
+  **原生七工具接法（刀 2 前置，已落）**：`ToolDefinition.execute` 只有 `read` 用 `ctx?.model`（非视觉图片提示）、`bash` 是 `if (exposeSessionEnvironment && ctx)` 守卫、其余五件 `_ctx?` 根本不看——**ctx 缺省可用**。故接法＝`StageAgentSession.getToolDefinition?(name)` 一条执行口：描述/schema 照抄 pi 的注册定义，执行借 pi 的实现；沙箱门在 `#botNativeTools` 里用**同一份** `createSandboxGate` 自己关一遍（台上那道挂在 pi 的 `tool_call` 钩子上，副编剧的循环不经过 pi）。`backendControl: false` 与台上、agent 模式同一开关、同一语义（副编剧面也没有原生工具）。
+
+  **与 §二/§三/§四 原文不同的地方（以此为准）**：
+
+  1. **`authoringHistory` 留，不删**（§三 原文说退场）。它不是工作模式的东西——**agent 模式的讨论层**在用它回放原始过程（`src/stage/discussion.ts` 的 `agentHistory`／讨论压缩／`livePromptTokens`，engine 的 agent 轮装配），刀 2 只改了它的文件头注释说明这一层关系。
+  2. **副编剧 system 多一行环境事实**（§4.1 原文是「卡级 APPEND → BOT.md」两段）。原生工具按 cwd 解析相对路径，不告诉它就不知道自己在哪——**实弹坐实**：一问「看看卡目录」它就从工程根 `ls .`，当场撞沙箱门（「请求列出：. 范围：整个工程根」）。故 system＝[卡级 APPEND] → [工作目录／当前角色卡] → [BOT.md]，与 agent 模式、旧工作模式同一行事实、同一位置语义（**是数据不是指令**）。
+  3. **模式切换整套删，不是收窄**（§三 原文说 `onModeChanged` 收窄）。`setMode` 的消费者只有 Web 的 `conversation_mode` 帧，而 authoring 走后模式不能在拍与拍之间切换（agent 是子项目属性）——故 `setMode`、`onModeChanged`、WS 帧、`#queue` 里的 mode 一并删。**遗留 authoring 由 `get mode()` 读成 roleplay**：树上条目照旧读得回来（`conversationMode()` 仍返回 authoring、`displayConversationBranch` 照旧分流），引擎的运行视图一律按扮演走，旧会话打开就是接着演。
+  4. **「全局/卡级 AUTHORING 覆盖槽」不存在**（§三 原文说要退场）。实查：`AUTHORING.md` 只有随包一份，`authoringSystemPrompt` 直接读它，没有第二级槽位；用户安装目录里的旧 `AUTHORING.md` 照旧不删（用户文件不动，只是不再被读）。
+  5. **Web 侧「扮演｜工作」开关留到刀 3**（§三 已列在刀 3）。现状＝点了没反应的死按钮（WS 帧已撤、无 `default` 分支故也不报错）；`server/wire.ts` 的 `ClientFrame` 类型同样留到刀 3 一起收。
+
+  **改**：`src/conversation-mode.ts`（`roleplayHistory`＋`AUTHORING_CONTEXT_TAG` 删；`authoringHistory` 留并改注释）、`src/stage/authoring.ts`（`CONVERSATION_MODE_TOOL`／`authoringSystemPrompt` 删）、`assets/AUTHORING.md`（删）、`src/stage/engine.ts`（workTools／workPrompt／modeExit／CONVERSATION_MODE_TOOL 分支删，`authoringTurn` 折叠成 `agentTurn`，`setMode` 删，`#toolDeps(side)` 分流，`#botNativeTools` 新）、`src/stage/bridge.ts`（`StageHooks.mode` 删——唯一消费者是工作模式那条分支）、`.liyuan/extensions/roleplay.ts`（`before_agent_start` 的 authoring 整份替换分支删）、`server/main.ts`（conversation_mode 帧、`onModeChanged`、`info.mode === "authoring"` 守卫删；`authoring:` 宿主件保留给 agent 与副编剧）、`src/i18n/en/server.ts`（两条死条目删）、`src/tools/registry.ts`＋`src/tools/card.ts`（注释随实情改）。
+
+  **台上写侧两族撤依赖（§二）**：`#toolDeps(side)`——`side="stage"`（扮演与 agent 两个视图共用）不注入 `writeLore/updateLore/deleteLore/createBook/addMemory/updateMemory/deleteMemory`，工具按既有 `availableSpecs` 机制自然下架，**零新增名单、零过滤分支**；`side="bot"` 全量。**不动**：`lorebook_toggle`／`lorebook_mount`（开关不是写入，§二原表也不在删除列）、card_read、worldline、panel、draft 族、ask、媒体、MCP。
+
+  **单测**：删 6 条工作模式用例（同一原生循环自动切入／手动选择与重开／切回后同批不执行／排队保留模式／鉴权等待时停止／中途停止），改 2 条（沙箱集成→副编剧原生工具与沙箱；写入门禁→「台上没有记忆写族」），加 3 条：**旧工作模式会话回归**（遗留条目读得回来、维护段不进上下文、续演照常）、**台前工具面快照**（无 conversation_mode／无两族写侧；有读侧／card_read／worldline／panel／draft／ask）、**副编剧原生工具与沙箱**（卡内静默、卡外先拒后批、本会话授权落树上、bash 永久授权落 卡.json、黑名单直接拒、`backendControl` 关时无原生工具）；`test/bot.test.ts` 加 1 条（原生工具进清单并派发／抛错回可读文本／图片块随回执）；`test/conversation-mode.test.ts` 的维护段用例改成刀 2 语义。
+
+  **实弹**（隔离实例 `_k5-test`＋捕获代理，模型 gemini-3.8-flash-high）：
+  1. **台前工具清单**：38 → **30**，去掉的正是 8 件（`conversation_mode`、lorebook 写四件、memory 写三件），**无新增**；留下 `lorebook_search/read/list/toggle/files/mount`、`memory_search/read/list`、`card_read`、`worldline_list/store`、`panel_*`、`draft_*` 族、`previous_draft_*`、`beat_plan`、`ask`、媒体族。
+  2. **送模文案对比**（同一会话、同一历史、同一输入，`git stash` 前后各跑一拍）：工具 schema **16041 → 12078 字节（−3963，−24.7%）**；**system 2351→2351 逐字相同**；**messages 4475→4475 逐字相同**（铁律一：拆除让送模文案变短，别处一字未动）。
+  3. **旧会话**：往会话里手工注入一段「工作模式时代」的遗留（mode 条目停在 authoring＋维护 user/assistant＋`liyuan-process` 工具条目），CLI 打开报「模式 roleplay」、续演正常；**11 条请求里 0 条**含【写卡维护】／维护正文／工具回执／`card_project`，上一拍正文照常在。
+  4. **副编剧回归**：`/bot` 两问——「用 ls 看一眼卡目录」第一问从工程根 `ls .` 撞门（促成上面第 2 条修正），加环境事实后第二问**直接 `ls cards/沈砚`，零撞门**、答对文件清单；线程 `<子项目>/副编剧.jsonl` 4 条。
+  5. 全量 `npm test` 870 项 868 过（2 项既有实卡红，与刀 1 基线同）；i18n-check 干净（0 死条目）；tsc 无新增诊断。
+
