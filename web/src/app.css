@@ -13982,12 +13982,11 @@ html[data-has-wallpaper="true"] .composer-box {
 }
 .char-sprite img {
 	display: block;
-	/* contain 顶边：宽或高先顶到空白栏边界为止，其余留白 */
-	max-width: 100%;
-	max-height: 100%;
-	width: auto;
-	height: auto;
+	/* 撑满空白栏 + contain：等比放大到宽或高顶到栏边为止（max-* 只限不放，改成 100% 才会放大） */
+	width: 100%;
+	height: 100%;
 	object-fit: contain;
+	object-position: center;
 	/* 柔和压边，别抢正文戏 */
 	filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.35)) saturate(0.92);
 	opacity: 0.95;
