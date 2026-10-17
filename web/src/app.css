@@ -13957,34 +13957,40 @@ html[data-has-wallpaper="true"] .composer-box {
 }
 
 /* ============================================================
-   角色大立绘（Chief fork）：固定悬浮在聊天列左下
-   - 不随消息滚动（absolute 锚在 stage-col-left）
+   角色大立绘（Chief fork）v2：占满聊天列左侧空白栏
+   - 覆盖整列（absolute inset-0），flex 居中；不随消息滚动
+   - 图片 contain 顶边：宽或高先顶到栏边为止，其余留白
    - pointer-events:none 完全点击穿透，不挡正文操作
    - 卡图缺失时上层 JSX 已不渲染；窄屏直接隐藏
    ============================================================ */
 .char-sprite {
 	position: absolute;
+	top: 0;
+	bottom: 0;
 	left: 0;
-	bottom: calc(var(--composer-h, 0px) + 8px);
-	z-index: 3;
+	/* 只占正文栏(--chat-w 居中)左边的空白区；窗口不够宽时自动缩为 0 并隐藏 */
+	width: max(0px, calc((100% - var(--chat-w, 880px)) / 2));
+	z-index: 2;
 	pointer-events: none;
 	user-select: none;
 	-webkit-user-drag: none;
-	/* 底部渐隐融入，像从画面里走出来 */
-	-webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent 100%);
-	mask-image: linear-gradient(to bottom, #000 82%, transparent 100%);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	overflow: hidden;
 	animation: sprite-in 0.35s ease-out;
 }
 .char-sprite img {
 	display: block;
-	height: min(56vh, 560px);
-	max-width: min(30vw, 340px);
+	/* contain 顶边：宽或高先顶到空白栏边界为止，其余留白 */
+	max-width: 100%;
+	max-height: 100%;
 	width: auto;
+	height: auto;
 	object-fit: contain;
-	object-position: left bottom;
 	/* 柔和压边，别抢正文戏 */
 	filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.35)) saturate(0.92);
-	opacity: 0.92;
+	opacity: 0.95;
 }
 @keyframes sprite-in {
 	from { opacity: 0; transform: translateY(12px); }
