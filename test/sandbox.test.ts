@@ -88,6 +88,26 @@ test("沙箱判定：卡内自由、公共库只读、其余申请；bash 与非
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+test("沙箱判定：命令免问档＝黑名单之外整条放行", () => {
+	const { cwd } = makeWorkspace();
+	try {
+		const ask = sandboxScope(cwd, { card: "cards/云澜/云澜.json" });
+		assert.equal(ask.bashFreeRun, false, "缺省＝逐条询问");
+		const free = sandboxScope(cwd, { card: "cards/云澜/云澜.json", bashFreeRun: true });
+		assert.deepEqual(
+			sandboxVerdict("bash", { command: "cd cards/云澜 && grep -n 师姐 *.json" }, free, NO_GRANTS),
+			{ kind: "allow" },
+			"免问档：组合命令整条放行，不再逐段申请",
+		);
+		const denied = sandboxVerdict("bash", { command: "cd /tmp && rm -rf /etc" }, free, NO_GRANTS);
+		assert.equal(denied.kind, "deny", "免问档仍拦黑名单（黑名单是唯一门槛），组合命令里的照样拦");
+		const askMode = sandboxVerdict("bash", { command: "cd cards/云澜 && grep -n 师姐 *.json" }, ask, NO_GRANTS);
+		assert.equal(askMode.kind, "ask-bash", "关档＝照旧逐条申请");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("沙箱判定：卡内的符号链接指向卡外＝卡外", (t) => {
 	const { cwd, cardDir, scope } = makeWorkspace();
 	try {

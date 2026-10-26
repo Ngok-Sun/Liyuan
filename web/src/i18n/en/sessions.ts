@@ -233,6 +233,8 @@ export const sessions: Record<string, string> = {
 	"agent 行为": "Agent behavior",
 	"后端操控（bash / 文件等通用工具）": "Backend control (bash, files and other general tools)",
 	"开启后 agent 能操作本机（调用你的其他项目、查资料）；全部调用都会显示在过程条。仅在自己的设备上开启。": "When on, the agent can operate this machine (use your other projects, look things up); every call shows in the process strip. Enable only on your own device.",
+	"命令免问（黑名单除外）": "Skip command prompts (denylist excepted)",
+	"开=bash 命令只在命中命令黑名单时被拒绝，其余整条直接执行（连 cd 加 grep 这类组合也不问）；关=除免问前缀外，每条命令都先问你。": "On: a bash command is refused only when it hits the command denylist; everything else runs whole with no prompt (compound `cd … && grep …` included). Off: apart from already-allowed prefixes, every command asks you first.",
 	"决策门禁（戏内选择卡）": "Decision gate (in-story choice cards)",
 	"开=询问档：剧情相关（含「我该怎么办」）一律戏内，用选择卡共创；关=静默档自行推进。戏外只办系统事，不处理剧情。": "On (ask): anything story-related, including “what should I do”, stays in-story and is co-written through choice cards. Off (silent): the agent moves the story on its own. Out-of-story messages handle system matters only.",
 	"命令黑名单": "Command denylist",

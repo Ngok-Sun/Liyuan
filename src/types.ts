@@ -147,6 +147,12 @@ export interface RpConfig {
 	preset?: string;
 	/** 本机工具总开关：开则 bash/读写等回到工具底座；本机开发默认开，分发默认关 */
 	backendControl?: boolean;
+	/**
+	 * 命令免问档（仅在后端操控开启时有意义）：
+	 * true ＝ bash 只在命中命令黑名单时被拒绝，其余整条直接执行（连 `cd … && grep …` 也不问）；
+	 * 缺省/false ＝ 每条命令都先申请（现状：按免问前缀放行，其余逐条询问）。
+	 */
+	bashFreeRun?: boolean;
 	/** 决策门禁档位（PLAN-PHASE4 柱 1）：ask=关键剧情决策点停笔询问用户；silent=不问，等同旧行为。默认 silent */
 	creationMode?: "ask" | "silent";
 	/**

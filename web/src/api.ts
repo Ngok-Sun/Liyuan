@@ -374,6 +374,8 @@ export interface RpConfigView {
 	preset?: string;
 	disabledLore?: string[];
 	backendControl?: boolean;
+	/** 命令免问档：开＝bash 只在命中黑名单时被拒，其余直接执行；缺省＝逐条询问 */
+	bashFreeRun?: boolean;
 	creationMode?: "ask" | "silent";
 	/** 固定楼层压缩：每 N 个叙事轮主动压缩早期正文；0=仅被动压缩 */
 	compactEveryNTurns?: number;

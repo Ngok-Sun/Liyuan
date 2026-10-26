@@ -521,6 +521,7 @@ const CONFIG_EDITABLE = new Set([
 	"samplers",
 	"disabledLore",
 	"backendControl",
+	"bashFreeRun",
 	"creationMode",
 	"assistantModel",
 	"sideModel",
@@ -537,6 +538,8 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 			next[k] = v;
 		}
 	}
+	// 命令免问档：只认布尔 true（脏值/字符串一律当关，保持逐条询问）
+	if (next.bashFreeRun !== undefined) next.bashFreeRun = next.bashFreeRun === true;
 	// 必填字段兜底
 	if (typeof next.userName !== "string" || !next.userName) next.userName = DEFAULT_CONFIG.userName;
 	if (typeof next.language !== "string" || !next.language) next.language = DEFAULT_CONFIG.language;

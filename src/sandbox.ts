@@ -49,6 +49,11 @@ export interface SandboxScope {
 	readRoots: string[];
 	/** 命令黑名单规则（`<agentDir>/BASH_DENYLIST.txt`，用户可见可改）；空表＝不拦 */
 	denyRules: DenylistRule[];
+	/**
+	 * 命令免问档（`liyuan.config.json` 的 bashFreeRun，用户在设置里开）：
+	 * true ＝ 黑名单之外一律直接执行，不再逐条申请；false ＝ 现状（每段都要命中免问前缀）
+	 */
+	bashFreeRun: boolean;
 }
 
 export interface SandboxGrants {
@@ -133,7 +138,7 @@ export function grantUnit(cwd: string, target: string): string {
 
 export function sandboxScope(
 	cwd: string,
-	config: { card: string; lorebook?: string; lorebooks?: string[] },
+	config: { card: string; lorebook?: string; lorebooks?: string[]; bashFreeRun?: boolean },
 	chatDir?: string,
 ): SandboxScope {
 	const cardAbs = resolve(cwd, config.card);
@@ -155,6 +160,7 @@ export function sandboxScope(
 		roots: roots.map(realExisting),
 		readRoots: readRoots.map(realExisting),
 		denyRules: readDenylistRules(),
+		bashFreeRun: config.bashFreeRun === true,
 	};
 }
 
@@ -213,6 +219,8 @@ export function sandboxVerdict(tool: string, input: Record<string, unknown>, sco
 		const command = String(input.command ?? "");
 		const hit = matchDenylist(command, scope.denyRules);
 		if (hit) return { kind: "deny", reason: `已拦截：命中命令黑名单「${hit.raw}」，梨园不允许执行。如确有需要，请向用户说明。` };
+		// 免问档（用户显式开启）：黑名单之外一律放行，连 `cd … && grep …` 这类组合也整条执行
+		if (scope.bashFreeRun) return { kind: "allow" };
 		return allowedByPrefix(command, grants.bashAllow) ? { kind: "allow" } : { kind: "ask-bash", command };
 	}
 	const target = realExisting(sandboxTarget(tool, input, scope.cwd)!);

@@ -735,6 +735,7 @@ export function SettingsPanel({
 	const [maxLore, setMaxLore] = useState(3);
 	const [compactEvery, setCompactEvery] = useState(30);
 	const [backendControl, setBackendControl] = useState(true);
+	const [bashFreeRun, setBashFreeRun] = useState(false);
 	const [askMode, setAskMode] = useState(false);
 	const [dirty, setDirty] = useState(false);
 
@@ -744,6 +745,7 @@ export function SettingsPanel({
 			setMaxLore(data.config.maxLoreInjections);
 			setCompactEvery(data.config.compactEveryNTurns ?? 30);
 			setBackendControl(data.config.backendControl !== false);
+			setBashFreeRun(data.config.bashFreeRun === true);
 			setAskMode(data.config.creationMode === "ask");
 			setDirty(false);
 		}
@@ -761,6 +763,7 @@ export function SettingsPanel({
 				maxLoreInjections: maxLore,
 				compactEveryNTurns: compactEvery,
 				backendControl,
+				bashFreeRun,
 				creationMode: askMode ? "ask" : "silent",
 			});
 			reload();
@@ -834,6 +837,19 @@ export function SettingsPanel({
 						</div>
 						<div className="field-hint">
 							{t("开启后 agent 能操作本机（调用你的其他项目、查资料）；全部调用都会显示在过程条。仅在自己的设备上开启。")}
+						</div>
+						<div className="toggle-row">
+							<span>{t("命令免问（黑名单除外）")}</span>
+							<Toggle
+								checked={bashFreeRun}
+								onChange={(v) => {
+									setBashFreeRun(v);
+									touch();
+								}}
+							/>
+						</div>
+						<div className="field-hint">
+							{t("开=bash 命令只在命中命令黑名单时被拒绝，其余整条直接执行（连 cd 加 grep 这类组合也不问）；关=除免问前缀外，每条命令都先问你。")}
 						</div>
 						{onOpenDenylist && (
 							<>
