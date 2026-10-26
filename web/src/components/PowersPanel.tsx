@@ -1,12 +1,11 @@
 /**
- * 扩展能力面板（左栏，PLAN-PANELS-V2 §2.7）：agent 能调用的外部能力，分两类页签——
- * 技能（skill）与 MCP（内置 / 外部两栏：内置随梨园发布包走，外部为本机发现 + 项目手写）。
- * 配置编辑：单张完整 JSON 卡（JSON 为准），无表单。
+ * 扩展能力面板（左栏，PLAN-PANELS-V2 §2.7）：
+ * 分为「技能（Skills）」与「MCP（外部工具服务）」两页签。
  */
 
-import { useRef, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPut, downloadText, type SkillInfo } from "../api.ts";
-import { IconPencil, IconTrash } from "./icons.tsx";
+import { useState } from "react";
+import { apiDelete, apiGet, apiPost, apiPut } from "../api.ts";
+import { IconPencil, IconPlus, IconRefresh, IconTrash } from "./icons.tsx";
 import { ConfirmButton, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { SkillLibrary } from "./SkillLibrary.tsx";
 import { t } from "../i18n/index.ts";
@@ -30,7 +29,7 @@ interface McpServerStatus {
 	source?: McpSource;
 	sources?: McpSource[];
 	discovered?: boolean;
-	/** true=梨园内置（「内置 MCP」栏） */
+	/** true=梨园内置 */
 	builtin?: boolean;
 }
 
@@ -71,217 +70,6 @@ const sourceLabel: Record<McpSource, string> = {
 	"project-mcp": "项目.mcp", // i18n-ignore：用时 t()
 	liyuan: "本项目", // i18n-ignore：用时 t()
 };
-
-/** 从技能全文解析 frontmatter 与正文（编辑保存时重组） */
-function splitSkill(raw: string): { name: string; description: string; disableModelInvocation: boolean; body: string } {
-	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw);
-	if (!m) return { name: "", description: "", disableModelInvocation: false, body: raw.trim() };
-	const head = m[1];
-	const pick = (k: string) => new RegExp(`^${k}:\\s*(.*)$`, "m").exec(head)?.[1]?.trim() ?? "";
-	return {
-		name: pick("name"),
-		description: pick("description"),
-		disableModelInvocation: /^disable-model-invocation:\s*true\s*$/m.test(head),
-		body: m[2].trim(),
-	};
-}
-
-function SkillRow({
-	s,
-	busy,
-	onSaved,
-	onDelete,
-	toast,
-}: {
-	s: SkillInfo;
-	busy: boolean;
-	onSaved: () => void;
-	onDelete: (file: string) => void;
-	toast: (level: "info" | "warning" | "error", text: string) => void;
-}) {
-	const [content, setContent] = useState<string | null>(null);
-	const [editing, setEditing] = useState(false);
-	const [draft, setDraft] = useState("");
-	const [saving, setSaving] = useState(false);
-
-	const loadContent = async (): Promise<string | null> => {
-		if (content !== null) return content;
-		try {
-			const r = await apiGet<{ content: string }>(`/api/skills/content?file=${encodeURIComponent(s.file)}`);
-			setContent(r.content);
-			return r.content;
-		} catch (e) {
-			toast("error", e instanceof Error ? e.message : String(e));
-			return null;
-		}
-	};
-
-	const saveWith = async (patch: { content?: string; disableModelInvocation?: boolean }) => {
-		const raw = await loadContent();
-		if (raw === null) return;
-		const parsed = splitSkill(raw);
-		setSaving(true);
-		try {
-			await apiPost("/api/skills", {
-				name: s.name,
-				description: s.description,
-				content: patch.content ?? parsed.body,
-				disableModelInvocation: patch.disableModelInvocation ?? s.disableModelInvocation,
-			});
-			setContent(null);
-			onSaved();
-		} catch (e) {
-			toast("error", e instanceof Error ? e.message : String(e));
-		} finally {
-			setSaving(false);
-		}
-	};
-
-	const startEdit = async () => {
-		const c = await loadContent();
-		if (c === null) return;
-		setDraft(splitSkill(c).body);
-		setEditing(true);
-	};
-
-	const doExport = async () => {
-		const c = await loadContent();
-		if (c !== null) downloadText(`${s.name}.md`, c);
-	};
-
-	return (
-		<div className="lore-item">
-			<div className="lore-head">
-				<details onToggle={(ev) => (ev.target as HTMLDetailsElement).open && void loadContent()}>
-					<summary>
-						<span className="lore-title">{s.name}</span>
-						{s.description && <span className="lore-meta skill-desc">{s.description}</span>}
-					</summary>
-					{editing ? (
-						<div className="skill-edit">
-							<textarea className="panel-search ta" rows={10} value={draft} onChange={(e) => setDraft(e.target.value)} />
-							<div className="panel-row">
-								<button
-									className="drawer-btn"
-									disabled={saving}
-									onClick={() => {
-										void saveWith({ content: draft }).then(() => setEditing(false));
-									}}
-								>
-									{saving ? t("保存中…") : t("保存")}
-								</button>
-								<button className="drawer-btn" onClick={() => setEditing(false)}>
-									{t("取消")}
-								</button>
-							</div>
-						</div>
-					) : (
-						content !== null && <div className="longtext">{content}</div>
-					)}
-					{!editing && (
-						<div className="skill-acts">
-							<button className="act" onClick={() => void startEdit()}>
-								<IconPencil size={12} /> {t("编辑")}
-							</button>
-							<button className="act" onClick={() => void doExport()}>
-								{t("导出 .md")}
-							</button>
-							<ConfirmButton confirmText={t("确认删除")} disabled={busy} onConfirm={() => onDelete(s.file)}>
-								<IconTrash size={12} /> {t("删除")}
-							</ConfirmButton>
-						</div>
-					)}
-				</details>
-				<label className="expose-toggle" title={t("开=进入模型可见的技能索引，agent 可自主调用；关=对模型隐身")}>
-					<span className="expose-label">{s.disableModelInvocation ? t("已隐藏") : t("已暴露")}</span>
-					<Toggle
-						checked={!s.disableModelInvocation}
-						disabled={busy || saving}
-						onChange={(v) => void saveWith({ disableModelInvocation: !v })}
-					/>
-				</label>
-			</div>
-		</div>
-	);
-}
-
-function NewSkillForm({ onCreated, toast }: { onCreated: () => void; toast: (level: "info" | "warning" | "error", text: string) => void }) {
-	const [open, setOpen] = useState(false);
-	const [name, setName] = useState("");
-	const [desc, setDesc] = useState("");
-	const [body, setBody] = useState("");
-	const [busy, setBusy] = useState(false);
-	const fileRef = useRef<HTMLInputElement>(null);
-
-	const create = async () => {
-		setBusy(true);
-		try {
-			await apiPost("/api/skills", { name: name.trim(), description: desc.trim(), content: body });
-			setName("");
-			setDesc("");
-			setBody("");
-			setOpen(false);
-			toast("info", t("技能已新建"));
-			onCreated();
-		} catch (e) {
-			toast("error", e instanceof Error ? e.message : String(e));
-		} finally {
-			setBusy(false);
-		}
-	};
-
-	const importMd = async (file: File) => {
-		try {
-			const raw = await file.text();
-			const parsed = splitSkill(raw);
-			await apiPost("/api/skills", {
-				name: parsed.name || file.name.replace(/\.md$/i, ""),
-				description: parsed.description,
-				content: parsed.body,
-				disableModelInvocation: parsed.disableModelInvocation,
-			});
-			toast("info", t("技能已导入"));
-			onCreated();
-		} catch (e) {
-			toast("error", e instanceof Error ? e.message : String(e));
-		} finally {
-			if (fileRef.current) fileRef.current.value = "";
-		}
-	};
-
-	return (
-		<div className="new-skill">
-			<div className="panel-row">
-				<button className="drawer-btn" onClick={() => setOpen((v) => !v)}>
-					{open ? t("收起") : t("＋ 新建技能")}
-				</button>
-				<button className="drawer-btn" onClick={() => fileRef.current?.click()}>
-					{t("导入 .md")}
-				</button>
-				<input
-					ref={fileRef}
-					type="file"
-					accept=".md,text/markdown"
-					hidden
-					onChange={(e) => {
-						const f = e.target.files?.[0];
-						if (f) void importMd(f);
-					}}
-				/>
-			</div>
-			{open && (
-				<div className="provider-edit">
-					<input className="panel-search" placeholder={t("技能名（如 codex-生图）")} value={name} onChange={(e) => setName(e.target.value)} />
-					<input className="panel-search" placeholder={t("一句话描述")} value={desc} onChange={(e) => setDesc(e.target.value)} />
-					<textarea className="panel-search ta" rows={6} placeholder={t("正文：endpoint、认证、请求格式、curl 示例…")} value={body} onChange={(e) => setBody(e.target.value)} />
-					<button className="drawer-btn" disabled={busy || !name.trim() || !body.trim()} onClick={() => void create()}>
-						{busy ? t("创建中…") : t("创建")}
-					</button>
-				</div>
-			)}
-		</div>
-	);
-}
 
 // ---------- MCP 配置编辑器：单张完整 JSON 卡（JSON 为准） ----------
 
@@ -425,7 +213,7 @@ function McpServerForm({
 
 			<div className="panel-row" style={{ marginTop: 8 }}>
 				<button
-					className="drawer-btn"
+					className="drawer-btn save-btn"
 					disabled={busy || localBusy}
 					onClick={() => {
 						setLocalBusy(true);
@@ -478,13 +266,11 @@ function McpServerRow({
 	const [saving, setSaving] = useState(false);
 	const projectOwned = !!cfg || st.source === "liyuan";
 	const src = st.source ? t(sourceLabel[st.source]) : t("发现");
-	// 编辑预填：项目条目优先，发现项退回目录完整配置
 	const editInitial = cfg ?? base ?? { id: st.id, name: st.name, transport: st.transport };
 
 	const toggleEnabled = async (enabled: boolean) => {
 		setSaving(true);
 		try {
-			// 本对话开关；同时写入新对话默认，避免「开了下次又没了」
 			await apiPost("/api/mcp/enable", { id: st.id, enabled, persistDefault: true });
 			onChanged();
 		} catch (e) {
@@ -529,15 +315,20 @@ function McpServerRow({
 	};
 
 	return (
-		<div className="lore-item">
-			<div className="lore-head">
-				<button type="button" className="lore-head-main" onClick={() => setExpanded((v) => !v)}>
-					<span className="lore-title">{st.name}</span>
-					<span className="lore-meta">
-						{st.builtin ? "" : `${src} · `}
-						{st.transport} · {t(statusLabel[st.status])}
-						{st.tools.length ? t(" · {n} 工具", { n: st.tools.length }) : ""}
-					</span>
+		<div className={`mcp-card-item ${st.enabled ? "on" : ""}`}>
+			<div className="mcp-card-head">
+				<button type="button" className="mcp-card-main" onClick={() => setExpanded((v) => !v)}>
+					<div className="mcp-card-title-row">
+						<span className={`mcp-status-dot status-${st.status}`} title={t(statusLabel[st.status])} />
+						<span className="mcp-card-name">{st.name}</span>
+						<span className="mcp-badge">{src}</span>
+						<span className="mcp-badge">{st.transport}</span>
+					</div>
+					<div className="mcp-card-sub">
+						<span>{t(statusLabel[st.status])}</span>
+						{st.tools.length > 0 && <span>{t(" · {n} 工具", { n: st.tools.length })}</span>}
+						{st.summary && <span className="mcp-card-summary" title={st.summary}> · {st.summary}</span>}
+					</div>
 				</button>
 				<button
 					type="button"
@@ -553,14 +344,14 @@ function McpServerRow({
 				</label>
 			</div>
 			{expanded && (
-				<div className="lore-body" style={{ marginTop: 6 }}>
+				<div className="mcp-card-body">
 					{st.error && <div className="sp-empty" style={{ color: "var(--danger, #b44)" }}>{st.error}</div>}
 					{st.tools.length > 0 && (
-						<ul className="mcp-tool-list" style={{ margin: "8px 0", paddingLeft: 18, fontSize: 12 }}>
-							{st.tools.map((t) => (
-								<li key={t.qualifiedName} title={t.description}>
-									<code>{t.qualifiedName}</code>
-									{t.description ? ` — ${t.description}` : ""}
+						<ul className="mcp-tool-list">
+							{st.tools.map((tool) => (
+								<li key={tool.qualifiedName} title={tool.description}>
+									<code>{tool.qualifiedName}</code>
+									{tool.description ? ` — ${tool.description}` : ""}
 								</li>
 							))}
 						</ul>
@@ -600,18 +391,16 @@ function McpServerRow({
 							}}
 						/>
 					) : (
-						<div className="skill-acts">
+						<div className="skill-card-acts">
 							<button className="act" disabled={busy || saving} onClick={() => void probe()}>
 								{t("测试连接")}
 							</button>
-							{projectOwned && !st.builtin && (
-								<ConfirmButton confirmText={t("确认删除")} disabled={busy || saving} onConfirm={() => void remove()}>
+							<button className="act" disabled={busy || saving} onClick={openEdit}>
+								<IconPencil size={12} /> {t("编辑配置")}
+							</button>
+							{projectOwned && (
+								<ConfirmButton className="act" confirmText={t("确认删除")} disabled={busy || saving} onConfirm={() => void remove()}>
 									<IconTrash size={12} /> {t("删除")}
-								</ConfirmButton>
-							)}
-							{projectOwned && st.builtin && (
-								<ConfirmButton confirmText={t("确认重置")} disabled={busy || saving} onConfirm={() => void remove()}>
-									{t("重置配置")}
 								</ConfirmButton>
 							)}
 						</div>
@@ -626,15 +415,12 @@ function McpSection({ toast }: { toast: (level: "info" | "warning" | "error", te
 	const { data, error, loading, reload } = usePanelData(() => apiGet<McpListResponse>("/api/mcp"), { watchAgent: true, cacheKey: "/api/mcp" });
 	const { busy, run } = useAction(toast);
 	const [adding, setAdding] = useState(false);
-	const [kind, setKind] = useState<"builtin" | "external">("builtin");
 	const servers = data?.servers ?? [];
 	const configs = data?.config ?? [];
 	const catalog = data?.catalog ?? [];
 	const cfgById = new Map(configs.map((c) => [c.id, c]));
 	const catById = new Map(catalog.map((c) => [c.id, c]));
-	const builtins = servers.filter((s) => s.builtin);
 	const externals = servers.filter((s) => !s.builtin);
-	const list = kind === "builtin" ? builtins : externals;
 
 	const sync = () =>
 		run(async () => {
@@ -645,25 +431,15 @@ function McpSection({ toast }: { toast: (level: "info" | "warning" | "error", te
 	return (
 		<section className="sp-section">
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
-			<div className="seg-row" style={{ marginBottom: 8 }}>
-				<button className={`seg ${kind === "builtin" ? "active" : ""}`} onClick={() => setKind("builtin")}>
-					{t("内置 MCP")}
+			<div className="panel-row list-toolbar" style={{ marginBottom: 8 }}>
+				<button type="button" className="drawer-btn save-btn" onClick={() => setAdding((v) => !v)}>
+					<IconPlus size={13} /> {adding ? t("收起") : t("＋ 添加")}
 				</button>
-				<button className={`seg ${kind === "external" ? "active" : ""}`} onClick={() => setKind("external")}>
-					{t("外部 MCP")}
+				<button type="button" className="drawer-btn" disabled={busy} onClick={() => void sync()}>
+					<IconRefresh size={13} /> {t("重新同步")}
 				</button>
 			</div>
-			{kind === "external" && (
-				<div className="panel-row">
-					<button className="drawer-btn" onClick={() => setAdding((v) => !v)}>
-						{adding ? t("收起") : t("＋ 添加")}
-					</button>
-					<button className="drawer-btn" disabled={busy} onClick={() => void sync()}>
-						{t("重新同步")}
-					</button>
-				</div>
-			)}
-			{kind === "external" && adding && (
+			{adding && (
 				<McpServerForm
 					mode="create"
 					busy={busy}
@@ -684,33 +460,26 @@ function McpSection({ toast }: { toast: (level: "info" | "warning" | "error", te
 					}}
 				/>
 			)}
-			{data && kind === "external" && externals.length === 0 && !adding && <div className="sp-empty">{t("未发现外部 MCP。")}</div>}
-			{list.map((st) => (
-				<McpServerRow
-					key={st.id}
-					st={st}
-					cfg={cfgById.get(st.id)}
-					base={catById.get(st.id)}
-					busy={busy}
-					onChanged={reload}
-					toast={toast}
-				/>
-			))}
+			{data && externals.length === 0 && !adding && <div className="sp-empty">{t("未发现外部 MCP。")}</div>}
+			<div className="skill-card-list">
+				{externals.map((st) => (
+					<McpServerRow
+						key={st.id}
+						st={st}
+						cfg={cfgById.get(st.id)}
+						base={catById.get(st.id)}
+						busy={busy}
+						onChanged={reload}
+						toast={toast}
+					/>
+				))}
+			</div>
 		</section>
 	);
 }
 
 export function PowersPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const [tab, setTab] = useState<"skills" | "mcp">("skills");
-	const { data, error, loading, reload } = usePanelData(() => apiGet<{ skills: SkillInfo[] }>("/api/skills"), { watchAgent: true, cacheKey: "/api/skills" });
-	const { busy, run } = useAction(toast);
-	const list = data?.skills ?? [];
-
-	const remove = (file: string) =>
-		run(async () => {
-			await apiDelete(`/api/skills?file=${encodeURIComponent(file)}`);
-			reload();
-		}, t("已删除"));
 
 	return (
 		<div className="panel-body">
@@ -723,26 +492,7 @@ export function PowersPanel({ toast }: { toast: (level: "info" | "warning" | "er
 				</button>
 			</div>
 
-			{tab === "skills" && (
-				<>
-					<div className="preset-chan-head"><span className="lore-meta"><b>{t("扮演教导")}</b>{t(" · 写作/文风/场面")}</span></div>
-					<SkillLibrary toast={toast} />
-					<div className="preset-chan-head" style={{ marginTop: 12 }}><span className="lore-meta"><b>{t("办事笔记")}</b>{t(" · 外部服务调用")}</span></div>
-					<section className="sp-section">
-						<PanelStatus loading={loading} error={error} hasData={!!data} />
-						{data && (
-							<>
-								<NewSkillForm onCreated={reload} toast={toast} />
-								{list.length === 0 && <div className="sp-empty">{t("还没有办事笔记，可手动新建或导入。")}</div>}
-								{list.map((s) => (
-									<SkillRow key={s.file} s={s} busy={busy} onSaved={reload} onDelete={remove} toast={toast} />
-								))}
-							</>
-						)}
-					</section>
-				</>
-			)}
-
+			{tab === "skills" && <SkillLibrary toast={toast} />}
 			{tab === "mcp" && <McpSection toast={toast} />}
 		</div>
 	);

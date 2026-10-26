@@ -1,5 +1,6 @@
 /**
- * 用户角色面板：多身份管理 + ST 式头像（导入图片 → 方形裁剪 → 上传）。
+ * 用户角色面板（与角色卡同款宣纸名帖风格）：
+ * 上半区紧凑身份切换架 + 下半区当前身份名帖与只读优先的人设书页（点编辑才进文本框）。
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -11,11 +12,10 @@ import {
 	personaAvatarUrl,
 	type PersonaInfo,
 	type PersonasResponse,
-	type RpConfigView,
 } from "../api.ts";
 import { IconPlus, IconTrash } from "./icons.tsx";
 import { AvatarCropModal } from "./AvatarCropModal.tsx";
-import { ConfirmButton, Field, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { ConfirmButton, PanelStatus, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { t } from "../i18n/index.ts";
 
 function PersonaAvatar({
@@ -44,31 +44,24 @@ function PersonaAvatar({
 
 export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<PersonasResponse>("/api/personas"), { cacheKey: "/api/personas" });
-	const config = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
 	const { busy, run } = useAction(toast);
 
 	const active = data?.personas.find((p) => p.id === data.activeId) ?? null;
 
-	const [name, setName] = useState("");
-	const [persona, setPersona] = useState("");
-	const [dirty, setDirty] = useState(false);
+	const [editingName, setEditingName] = useState(false);
+	const [nameDraft, setNameDraft] = useState("");
+	const [editingPersona, setEditingPersona] = useState(false);
+	const [personaDraft, setPersonaDraft] = useState("");
 	const [avatarBust, setAvatarBust] = useState(0);
+
 	useEffect(() => {
 		if (active) {
-			setName(active.name);
-			setPersona(active.persona);
-			setDirty(false);
+			setNameDraft(active.name);
+			setPersonaDraft(active.persona);
+			setEditingName(false);
+			setEditingPersona(false);
 		}
-	}, [active?.id, active?.name, active?.persona]); // eslint-disable-line react-hooks/exhaustive-deps
-
-	const [displayName, setDisplayName] = useState("");
-	const [displayDirty, setDisplayDirty] = useState(false);
-	useEffect(() => {
-		if (config.data) {
-			setDisplayName(config.data.config.displayName ?? "");
-			setDisplayDirty(false);
-		}
-	}, [config.data]);
+	}, [active?.id, active?.name, active?.persona]);
 
 	const [creating, setCreating] = useState(false);
 	const [newName, setNewName] = useState("");
@@ -78,7 +71,6 @@ export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "e
 
 	const selectPersona = (p: PersonaInfo) =>
 		run(async () => {
-			// softRefresh：热更新身份，不整会话 reload
 			await apiPost("/api/personas/select", { id: p.id });
 			reload();
 		});
@@ -98,10 +90,19 @@ export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "e
 			reload();
 		}, t("已删除：{name}", { name: p.name }));
 
-	const saveActive = () =>
+	const saveName = () =>
+		run(async () => {
+			if (!active || !nameDraft.trim()) return;
+			await apiPut("/api/personas", { id: active.id, name: nameDraft.trim(), persona: active.persona });
+			setEditingName(false);
+			reload();
+		}, t("已保存"));
+
+	const savePersona = () =>
 		run(async () => {
 			if (!active) return;
-			await apiPut("/api/personas", { id: active.id, name: name.trim(), persona });
+			await apiPut("/api/personas", { id: active.id, name: active.name, persona: personaDraft });
+			setEditingPersona(false);
 			reload();
 		}, t("已保存"));
 
@@ -111,12 +112,6 @@ export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "e
 			await apiPost("/api/personas/select", { id: active.id, lockToCard: locked });
 			reload();
 		}, locked ? t("已锁定到当前角色卡") : t("已解除锁定"));
-
-	const saveDisplayName = () =>
-		run(async () => {
-			await apiPut("/api/config", { displayName: displayName.trim() });
-			config.reload();
-		}, t("已保存并重载会话"));
 
 	const onPickFile = (file: File | undefined) => {
 		if (!file) return;
@@ -136,8 +131,8 @@ export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "e
 				headers: { "content-type": "image/png" },
 				body: blob,
 			});
-			const data = (await res.json().catch(() => ({}))) as { error?: string };
-			if (!res.ok || data.error) throw new Error(data.error || t("上传失败（HTTP {status}）", { status: res.status }));
+			const resData = (await res.json().catch(() => ({}))) as { error?: string };
+			if (!res.ok || resData.error) throw new Error(resData.error || t("上传失败（HTTP {status}）", { status: res.status }));
 			setCropFile(null);
 			setAvatarBust(Date.now());
 			reload();
@@ -158,7 +153,7 @@ export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "e
 		}, t("已清除头像"));
 
 	return (
-		<div className="panel-body">
+		<div className="panel-body rc-panel-body">
 			{cropFile && (
 				<AvatarCropModal
 					file={cropFile}
@@ -180,41 +175,22 @@ export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "e
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
 			{data && (
 				<>
-					<section className="sp-section">
-						<h4>{t("我的身份（{n}）", { n: data.personas.length })}</h4>
-						<div className="field-hint">
-							{t("你以谁的身份在玩（剧情中的 {{user}}）。点选即切换；可设置头像（导入图片并裁剪）。")}
+					{/* 上半区：身份切换架 */}
+					<section className="rc-shelf">
+						<div className="up-shelf-head">
+							<span className="up-shelf-title">{t("我的身份（{n}）", { n: data.personas.length })}</span>
+							{!creating && (
+								<button type="button" className="rc-btn rc-btn-primary" onClick={() => setCreating(true)}>
+									<IconPlus size={12} />
+									<span>{t("新建身份")}</span>
+								</button>
+							)}
 						</div>
-						<div className="persona-list">
-							{data.personas.map((p) => (
-								<div key={p.id} className={`persona-row ${p.id === data.activeId ? "current" : ""}`}>
-									<button className="persona-pick" disabled={busy} onClick={() => p.id !== data.activeId && selectPersona(p)}>
-										<PersonaAvatar p={p} bust={p.id === active?.id ? avatarBust : undefined} />
-										<span className="persona-info">
-											<span className="persona-name">
-												{p.name}
-												{p.id === data.current && <span className="chip">{t("默认")}</span>}
-												{p.id === data.lockedForCard && <span className="chip chip-constant">{t("本卡锁定")}</span>}
-											</span>
-											{p.persona && <span className="session-preview">{p.persona.slice(0, 50)}</span>}
-										</span>
-									</button>
-									{data.personas.length > 1 && (
-										<ConfirmButton disabled={busy} title={t("删除「{name}」", { name: p.name })} aria-label={t("删除身份")} confirmText={t("确认删除")} onConfirm={() => remove(p)}>
-											<IconTrash size={13} />
-										</ConfirmButton>
-									)}
-								</div>
-							))}
-						</div>
-						{!creating ? (
-							<button className="drawer-btn" onClick={() => setCreating(true)}>
-								<IconPlus size={13} /> {t("新建身份")}
-							</button>
-						) : (
-							<div className="panel-row">
+
+						{creating && (
+							<div className="rc-display-edit">
 								<input
-									className="panel-search"
+									className="rc-inline-input"
 									placeholder={t("名字…")}
 									value={newName}
 									autoFocus
@@ -224,79 +200,220 @@ export function PersonaPanel({ toast }: { toast: (level: "info" | "warning" | "e
 										if (e.key === "Escape") setCreating(false);
 									}}
 								/>
-								<button className="drawer-btn" disabled={busy || !newName.trim()} onClick={() => void create()}>
+								<button type="button" className="rc-btn rc-btn-primary" disabled={busy || !newName.trim()} onClick={() => void create()}>
 									{t("创建")}
+								</button>
+								<button type="button" className="rc-btn" onClick={() => setCreating(false)}>
+									{t("取消")}
 								</button>
 							</div>
 						)}
-					</section>
 
-					{active && (
-						<section className="sp-section">
-							<h4>{t("当前身份")}</h4>
-							<div className="persona-avatar-edit">
-								<PersonaAvatar p={{ ...active, name }} bust={avatarBust} size="lg" />
-								<div className="persona-avatar-acts">
-									<button type="button" className="drawer-btn" disabled={busy || uploading} onClick={() => fileRef.current?.click()}>
-										{active.avatar ? t("更换头像") : t("导入头像")}
-									</button>
-									{active.avatar && (
-										<button type="button" className="drawer-btn" disabled={busy || uploading} onClick={() => void clearAvatar()}>
-											{t("清除头像")}
+						<div className="rc-roster">
+							{data.personas.map((p) => {
+								const isCur = p.id === data.activeId;
+								return (
+									<div key={p.id} className={`rc-mini-card ${isCur ? "current" : ""}`}>
+										<button
+											type="button"
+											className="rc-mini-pick"
+											disabled={busy}
+											onClick={() => !isCur && void selectPersona(p)}
+										>
+											<PersonaAvatar p={p} bust={p.id === active?.id ? avatarBust : undefined} />
+											<div className="rc-mini-meta">
+												<span className="rc-mini-name">{p.name}</span>
+												<span className="rc-mini-sub">
+													{p.id === data.lockedForCard ? (
+														<span className="rc-cur-dot">{t("本卡锁定")}</span>
+													) : p.id === data.current ? (
+														t("默认")
+													) : p.persona ? (
+														p.persona.slice(0, 18)
+													) : (
+														t("当前身份")
+													)}
+												</span>
+											</div>
 										</button>
-									)}
-									<div className="field-hint">{t("从相册选图 → 拖动/缩放裁剪 → 保存为圆形头像")}</div>
-								</div>
-							</div>
-							<Field label={t("名字")} hint={t("即剧情中的 {{user}}，场记与提示词都用它")}>
-								<input
-									className="panel-search"
-									value={name}
-									onChange={(e) => {
-										setName(e.target.value);
-										setDirty(true);
-									}}
-								/>
-							</Field>
-							<Field label={t("人设（可选）")} hint={t("身份、外貌、背景……会进入角色卡的设定区")}>
-								<textarea
-									className="panel-search ta"
-									rows={5}
-									value={persona}
-									onChange={(e) => {
-										setPersona(e.target.value);
-										setDirty(true);
-									}}
-								/>
-							</Field>
-							<button className="drawer-btn" disabled={busy || !dirty || !name.trim()} onClick={saveActive}>
-								{dirty ? t("保存并重载会话") : t("已保存")}
-							</button>
-							<div className="toggle-row">
-								<span>{t("锁定到当前角色卡")}</span>
-								<Toggle checked={data.lockedForCard === active.id} disabled={busy} onChange={(v) => setLock(v)} />
-							</div>
-							<div className="field-hint">{t("锁定后，切到这张卡时自动使用该身份（其他卡仍用全局默认）。")}</div>
-						</section>
-					)}
-
-					<section className="sp-section">
-						<h4>{t("对方显示名覆盖")}</h4>
-						<Field label={t("显示名（可选）")} hint={t("仅界面显示；适用于卡名是剧本标题而非角色名的场景卡")}>
-							<input
-								className="panel-search"
-								placeholder={t("留空使用卡名")}
-								value={displayName}
-								onChange={(e) => {
-									setDisplayName(e.target.value);
-									setDisplayDirty(true);
-								}}
-							/>
-						</Field>
-						<button className="drawer-btn" disabled={busy || !displayDirty} onClick={saveDisplayName}>
-							{displayDirty ? t("保存并重载会话") : t("已保存")}
-						</button>
+										{data.personas.length > 1 && (
+											<div className="rc-mini-acts">
+												<ConfirmButton
+													className="rc-mini-icon rc-mini-del"
+													disabled={busy}
+													title={t("删除「{name}」", { name: p.name })}
+													aria-label={t("删除身份")}
+													confirmText="×"
+													onConfirm={() => void remove(p)}
+												>
+													<IconTrash size={11} />
+												</ConfirmButton>
+											</div>
+										)}
+									</div>
+								);
+							})}
+						</div>
 					</section>
+
+					{/* 下半区：当前身份宣纸名帖 + 人设书页 */}
+					{active && (
+						<div className="rc-dossier">
+							<section className="rc-hero-card">
+								<div className="rc-hero-main">
+									<PersonaAvatar p={active} bust={avatarBust} size="lg" />
+									<div className="rc-hero-info">
+										{!editingName ? (
+											<div className="rc-hero-head-row">
+												<h3 className="rc-hero-name" title={active.name}>{active.name}</h3>
+												<button
+													type="button"
+													className="rc-link-btn"
+													onClick={() => {
+														setNameDraft(active.name);
+														setEditingName(true);
+													}}
+													title={t("即剧情中的 {{user}}，场记与提示词都用它")}
+												>
+													{t("编辑")}
+												</button>
+											</div>
+										) : (
+											<div className="rc-display-edit">
+												<input
+													className="rc-inline-input"
+													value={nameDraft}
+													autoFocus
+													onChange={(e) => setNameDraft(e.target.value)}
+													onKeyDown={(e) => {
+														if (e.key === "Enter" && nameDraft.trim()) void saveName();
+														if (e.key === "Escape") setEditingName(false);
+													}}
+												/>
+												<button
+													type="button"
+													className="rc-btn rc-btn-primary"
+													disabled={busy || !nameDraft.trim()}
+													onClick={() => void saveName()}
+												>
+													{t("保存")}
+												</button>
+												<button type="button" className="rc-btn" onClick={() => setEditingName(false)}>
+													{t("取消")}
+												</button>
+											</div>
+										)}
+
+										<div className="up-avatar-row">
+											<button
+												type="button"
+												className="rc-btn"
+												disabled={busy || uploading}
+												onClick={() => fileRef.current?.click()}
+												title={t("从相册选图 → 拖动/缩放裁剪 → 保存为圆形头像")}
+											>
+												{active.avatar ? t("更换头像") : t("导入头像")}
+											</button>
+											{active.avatar && (
+												<button
+													type="button"
+													className="rc-btn"
+													disabled={busy || uploading}
+													onClick={() => void clearAvatar()}
+												>
+													{t("清除头像")}
+												</button>
+											)}
+										</div>
+									</div>
+								</div>
+
+								<div className="rc-hero-foot">
+									<span
+										className="rc-skin-toggle"
+										title={t("锁定后，切到这张卡时自动使用该身份（其他卡仍用全局默认）。")}
+									>
+										{t("锁定到当前角色卡")}
+									</span>
+									<Toggle
+										checked={data.lockedForCard === active.id}
+										disabled={busy}
+										onChange={(v) => void setLock(v)}
+									/>
+								</div>
+							</section>
+
+							<section className="rc-sheet-card">
+								<div className="rc-sheet-pane">
+									<div className="rc-field-subhead">
+										<span className="up-sheet-title">
+											{t("人设（可选）")}
+											<span className="rc-char-count" style={{ marginLeft: 6 }}>
+												{active.persona.trim() ? t("（{n} 字）", { n: active.persona.length }) : t("（空）")}
+											</span>
+										</span>
+										{!editingPersona && active.persona.trim() && (
+											<button
+												type="button"
+												className="rc-link-btn"
+												onClick={() => {
+													setPersonaDraft(active.persona);
+													setEditingPersona(true);
+												}}
+											>
+												{t("编辑")}
+											</button>
+										)}
+									</div>
+
+									{editingPersona ? (
+										<div className="rc-editor-box">
+											<textarea
+												className="panel-search ta"
+												rows={8}
+												placeholder={t("身份、外貌、背景……会进入角色卡的设定区")}
+												value={personaDraft}
+												onChange={(e) => setPersonaDraft(e.target.value)}
+											/>
+											<div className="rc-editor-actions">
+												<button
+													type="button"
+													className="rc-btn rc-btn-primary"
+													disabled={busy}
+													onClick={() => void savePersona()}
+												>
+													{t("保存并重载会话")}
+												</button>
+												<button
+													type="button"
+													className="rc-btn"
+													disabled={busy}
+													onClick={() => setEditingPersona(false)}
+												>
+													{t("取消")}
+												</button>
+											</div>
+										</div>
+									) : active.persona.trim() ? (
+										<div className="rc-prose">{active.persona}</div>
+									) : (
+										<div className="rc-empty-field">
+											<button
+												type="button"
+												className="card-empty-field-btn"
+												onClick={() => {
+													setPersonaDraft("");
+													setEditingPersona(true);
+												}}
+											>
+												{t("＋ {title}", { title: t("人设（可选）") })}
+											</button>
+										</div>
+									)}
+								</div>
+							</section>
+						</div>
+					)}
 				</>
 			)}
 		</div>

@@ -166,13 +166,13 @@
 	background: var(--surface-dim);
 }
 .cs-nav-toggle-btn {
-	display: none;
+	display: none !important;
 }
 .cs-nav-close-btn {
-	display: none;
+	display: none !important;
 }
 .cs-sidebar-backdrop {
-	display: none;
+	display: none !important;
 }
 
 
@@ -237,8 +237,8 @@
    左侧栏：创作大纲目录 (Left Sidebar) - 瘦身至 184px，雅致书卷风
    ========================================================================== */
 .cs-sidebar-left {
-	width: 184px;
-	min-width: 170px;
+	width: 182px;
+	min-width: 172px;
 	flex: none;
 	display: flex;
 	flex-direction: column;
@@ -312,6 +312,9 @@
 .cs-nav-item-name {
 	font-family: var(--font);
 	letter-spacing: 0.2px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 /* 徽标胶囊 (Badges) */
@@ -616,8 +619,8 @@
 
 .cs-split-pane {
 	display: grid;
-	grid-template-columns: 310px 1fr;
-	gap: 16px;
+	grid-template-columns: 220px 1fr;
+	gap: 0;
 	background: var(--surface);
 	border: 1px solid var(--hairline);
 	border-radius: var(--radius-s);

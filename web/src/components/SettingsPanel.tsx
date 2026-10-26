@@ -343,6 +343,10 @@ function MemorySection({ toast }: { toast: (level: "info" | "warning" | "error",
 					onChange={(v) => {
 						setEnabled(v);
 						setOpen(v);
+						void run(async () => {
+							await apiPut("/api/memory", { enabled: v });
+							reload();
+						}, t("记忆设置已保存"));
 					}}
 				/>
 			</div>

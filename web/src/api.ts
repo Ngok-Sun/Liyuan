@@ -41,9 +41,9 @@ function invalidateAfterWrite(writePath: string): void {
 			test: /^\/api\/card\/import-embedded-lore$/,
 			prefixes: ["/api/lorebook", "/api/lorebooks", "/api/config", "/api/card", "/api/cards", "/api/cardfront"],
 		},
-		// 换卡 / 卡详情写：必须连带清 cardfront，否则 180s 内仍吃上一张卡的皮肤缓存
+		// 换卡 / 卡详情写：必须连带清 cardfront 与 lorebooks（目标卡若保存过世界书选择会自动切换）
 		{ test: /^\/api\/cardfront/, prefixes: ["/api/cardfront"] },
-		{ test: /^\/api\/cards?/, prefixes: ["/api/card", "/api/cards", "/api/cardfront", "/api/card-agents", "/api/rules"] },
+		{ test: /^\/api\/cards?/, prefixes: ["/api/card", "/api/cards", "/api/cardfront", "/api/card-agents", "/api/rules", "/api/lorebooks", "/api/lorebook", "/api/config"] },
 		{ test: /^\/api\/persona/, prefixes: ["/api/personas", "/api/config"] },
 		// 挂载/改书 ⇒ 卡档案里的（世界书·…）镜像条目随之重写；装载/拨开关 ⇒ （预设）条目落进卡文件——两份文件的缓存一起失效
 		{ test: /^\/api\/lorebook/, prefixes: ["/api/lorebook", "/api/lorebooks", "/api/config", "/api/card-agents", "/api/rules"] },
@@ -55,6 +55,7 @@ function invalidateAfterWrite(writePath: string): void {
 		{ test: /^\/api\/models/, prefixes: ["/api/models", "/api/agent-config"] },
 		{ test: /^\/api\/channels/, prefixes: ["/api/models", "/api/agent-config", "/api/agent-profiles"] },
 		{ test: /^\/api\/config/, prefixes: ["/api/config"] },
+		{ test: /^\/api\/chats/, prefixes: ["/api/chats"] },
 		{ test: /^\/api\/backup/, prefixes: [] },
 		{ test: /^\/api\/upload/, prefixes: ["/api/uploads"] },
 	];
@@ -144,8 +145,8 @@ export async function apiGet<T>(path: string, opts?: { bypassCache?: boolean }):
 export function apiGetCacheClearForPanel(panelId: string): void {
 	const map: Record<string, string[]> = {
 		// 角色板块＝卡库 + 用户角色两页签，刷新一次清两边
-		roles: ["/api/card", "/api/cards", "/api/cardfront", "/api/personas", "/api/config"],
-		card: ["/api/card", "/api/cards", "/api/cardfront"],
+		roles: ["/api/card", "/api/cards", "/api/cardfront", "/api/personas", "/api/config", "/api/lorebooks"],
+		card: ["/api/card", "/api/cards", "/api/cardfront", "/api/lorebooks"],
 		lorebook: ["/api/lorebook", "/api/lorebooks", "/api/config", "/api/card-agents"],
 		persona: ["/api/personas", "/api/config"],
 		preset: ["/api/preset", "/api/presets", "/api/card-agents", "/api/rules"],
@@ -586,10 +587,11 @@ export interface PresetBlocksResponse {
 	blocks: Array<PresetBlockView & { content?: string }>;
 }
 
-/** 用户提示词：SYSTEM.md（全局系统提示词）+ 全局追加两份（扮演 APPEND_SYSTEM.md / agent 模式 AGENT_APPEND_SYSTEM.md）+ 这张卡的 APPEND_SYSTEM.md */
+/** 用户提示词：SYSTEM.md（全局系统提示词）+ 全局追加三份（扮演 APPEND_SYSTEM.md / 写作模式 AGENT_APPEND_SYSTEM.md / 助手 BOT.md）+ 这张卡的 APPEND_SYSTEM.md */
 export interface RulesResponse {
 	global: { content: string; path: string };
 	agent: { content: string; path: string };
+	bot: { content: string; path: string };
 	card: { content: string; path: string; cardName: string };
 	system: { content: string; path: string };
 }
@@ -647,6 +649,8 @@ export interface LorebooksResponse {
 	/** @deprecated 旧单本字段 */
 	activeOne?: string | null;
 	books: LorebookFileInfo[];
+	/** 当前角色卡是否已保存专属世界书选择（`cards/<卡>/卡.json` 的 `lorebooks`） */
+	lockedForCard?: boolean;
 }
 
 /** 规范化挂载列表（兼容旧 API 返回 string / null） */

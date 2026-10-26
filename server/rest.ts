@@ -11,11 +11,12 @@
 
 import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 
 import {
 	EMPTY_AGENT_CONFIG,
+	deleteChannelFromProfiles,
 	deleteProfile,
 	enableProfile,
 	findModelEntry,
@@ -24,6 +25,7 @@ import {
 	loadProfile,
 	materializeEnvKeysInConfig,
 	mergeModelEntries,
+	mergeProfilesIntoActiveConfig,
 	migrateActiveConfigIntoProfiles,
 	normalizeAgentConfig,
 	normalizeModels,
@@ -83,11 +85,13 @@ import {
 	SKILLS_PREFIX,
 	UPLOAD_PREFIX,
 	UPLOAD_PREFIX_LEGACY,
+	chatDirOf,
+	insidePath,
 	normalizeDataPath,
 	resolveConfigPath,
 	sameCardPath,
 } from "../src/paths.ts";
-import { createCardSpace, deleteChat, exportChatZip, importChatZip, listCardSpaces, renameChat, resolveCardSpace } from "../src/cardspace.ts";
+import { createCardSpace, deleteChat, exportChatZip, importChatZip, listCardSpaces, listChatMarkdownAssets, listChats, loadCardConfig, renameChat, resolveCardSpace, saveCardConfig } from "../src/cardspace.ts";
 import { scanSkillFiles, stageSkillRoot } from "../src/stage/materials.ts";
 import { deleteStageSkill, saveStageSkill } from "../src/stage/skill-store.ts";
 import type { WorldlineView } from "../src/worldline.ts";
@@ -110,6 +114,7 @@ import {
 	patchLorebookFileEntry,
 	searchEntries,
 	setMountedLorebooks,
+	toggleDisabledLore,
 	type LoreEntryPatch,
 	type NewLoreEntryInput,
 } from "../src/lorebook.ts";
@@ -136,6 +141,7 @@ import {
 } from "../src/preset-doc.ts";
 import {
 	agentRulesPath,
+	botRulesPath,
 	cardRulesPath,
 	globalRulesPath,
 	readUserRules,
@@ -145,26 +151,31 @@ import {
 	translateReport,
 } from "../src/user-rules.ts";
 import { denylistContent, denylistPath, parseDenylist } from "../src/bash-denylist.ts";
+import { BOT_PERSONA_FILE, BOT_PERSONA_PRESETS } from "../src/stage/bot.ts";
 import {
+	assembleForDeclare,
 	declarePieceHash,
 	isDeclareStation,
+	normalizeDeclaration,
 	runPresetDeclaration,
-	buildProcessPrompt,
-	compiledPieces,
 	compilePreset,
 	declarePieces,
 	declareTranslateReport,
-	parseProcessResponseWithError,
-	presetFingerprint,
-	processIntoEntries,
-	processReport,
 	stripPresetEntries,
 	translatePresetWithDeclaration,
+	type DeclareEntry,
 	type PresetDeclaration,
-	type PresetProcessStore,
 } from "../src/preset-declare.ts";
 import { cardAgentsPath, projectCardToAgents } from "../src/card-agents.ts";
-import { formatEntry, lorebookSourceSuffix, stripEntriesWhere, uniqueEntryName } from "../src/prompt-entries.ts";
+import {
+	PRESET_SOURCE_SUFFIX,
+	escapeEntryText,
+	formatEntry,
+	lorebookSourceSuffix,
+	parsePromptEntries,
+	stripEntriesWhere,
+	uniqueEntryName,
+} from "../src/prompt-entries.ts";
 import { cardProjectOperation, inspectCardProject, previewCardProject, readCardCover } from "../src/card-authoring.ts";
 import type { CardPreviewReport } from "./card-preview.ts";
 import type { ScreenshotReport } from "./screenshot.ts";
@@ -251,6 +262,8 @@ export interface ProviderRuntimeSnapshot {
 }
 
 export interface RestHost {
+	botSnapshot?: () => import("../src/stage/bot-session-types.ts").BotSessionSnapshot;
+	manageBot?: (request: import("../src/stage/bot-session-types.ts").BotSessionAction) => Promise<import("../src/stage/bot-session-types.ts").BotSessionSnapshot>;
 	cwd: string;
 	isStreaming(): boolean;
 	listModels(): { current: CurrentModelInfo | null; models: ModelInfo[] };
@@ -278,8 +291,8 @@ export interface RestHost {
 	settleScreenshot(report: ScreenshotReport): boolean;
 	/** 与写卡工具同一条预览通道（REST 侧供面板与验证用） */
 	runCardPreview(args: Record<string, unknown>): Promise<unknown>;
-	/** config.card 已写盘后调用：切到该卡最近会话，无则新建 */
-	switchToCard(): Promise<"switched" | "created">;
+	/** config.card 已写盘后调用：切到该卡最近会话，无则新建；switchSession=false 时仅刷新左栏会话树不切活跃对话 */
+	switchToCard(opts?: { switchSession?: boolean }): Promise<"switched" | "created">;
 	/** 经会话通道执行斜杠命令（/import 等，扩展的 notify 会以 wire notify 推送） */
 	promptCommand(text: string): Promise<void>;
 	/** 排队执行斜杠命令（不等待完成；流式中自动排到本轮结束）。返回是否进入了排队 */
@@ -763,11 +776,8 @@ function loadProjectAgentExtras(cwd: string): {
 }
 
 async function loadOrSeedAgentConfig(host: RestHost): Promise<{ path: string; exists: boolean; config: LiyuanAgentConfig; seeded: boolean }> {
-	// 仓库为空时，把当前启用配置拆进仓库（迁移）
-	const mig = migrateActiveConfigIntoProfiles(host.cwd);
-	if (mig.migrated) {
-		host.notify("info", t("已建立配置仓库：{ids}", { ids: mig.ids.join(t("、")) }));
-	}
+	// 把历史 liyuan-profiles/*.json 里的所有渠道合并进 liyuan.agent.json，实现多渠道同时在线聚合
+	mergeProfilesIntoActiveConfig(host.cwd);
 
 	const loaded = loadAgentConfig(host.cwd);
 
@@ -906,11 +916,22 @@ function resolveProbeKey(apiKey?: string): string | undefined {
 async function probeModelsEndpoint(
 	baseUrl: string,
 	apiKey?: string,
+	extraHeaders?: Record<string, string>,
 ): Promise<{ ok: boolean; status: number; detail: string; ids: string[] }> {
 	const url = `${baseUrl.replace(/\/+$/, "")}/models`;
 	const headers: Record<string, string> = {};
 	const resolved = resolveProbeKey(apiKey);
 	if (resolved) headers.authorization = `Bearer ${resolved}`;
+	if (extraHeaders && typeof extraHeaders === "object" && !Array.isArray(extraHeaders)) {
+		for (const [k, v] of Object.entries(extraHeaders)) {
+			const key = k.trim();
+			if (!key || typeof v !== "string") continue;
+			if (key.toLowerCase() === "authorization" && headers.authorization) {
+				delete headers.authorization;
+			}
+			headers[key] = v;
+		}
+	}
 	try {
 		const r = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
 		if (!r.ok) {
@@ -1142,8 +1163,6 @@ export interface PresetSyncResult {
 	/** none=未装载且无残留；stripped=卸载后剥净；unchanged=产物未变；written=产物已写 */
 	state: "none" | "stripped" | "unchanged" | "written";
 	preset?: string;
-	/** 用了哪种机制（declare＝声明分类；process＝模型处理） */
-	mode?: PresetMode;
 	active?: number;
 	disabled?: number;
 	/** 本次向模型声明的段数（0＝全部命中留档） */
@@ -1151,15 +1170,6 @@ export interface PresetSyncResult {
 	/** 声明失败：这些段按「拿不准一律留」落成活动条目，下次同步再问 */
 	declareError?: string;
 	pending?: number;
-	/** 机制二（process）：本次调了处理模型／两条产物字数／失败原因 */
-	processed?: boolean;
-	identityChars?: number;
-	writingChars?: number;
-	processError?: string;
-	/** 预设原文指纹与产物指纹不一致＝选项改了产物还是上次的（要点「重新装载」） */
-	stale?: boolean;
-	/** 从未处理且后台刷新不许烧模型——提示用户去点「重新装载」 */
-	needProcess?: boolean;
 }
 
 /**
@@ -1177,89 +1187,6 @@ const legacyDeclarationPath = (cardDir: string, presetName: string): string =>
 /** 声明失败后的退避（同一预设 60 秒内不再问模型）——每拨一次开关就撞一次 402 没有意义 */
 const declareFailedAt = new Map<string, number>();
 const DECLARE_RETRY_MS = 60_000;
-
-// ---------- 机制自选（2026-09-14 用户定案）：declare＝声明分类（默认）；process＝模型处理 ----------
-
-/** 机制表：一份 JSON 映射（assets/presets/.liyuan/预设机制.json），按预设名记；缺省＝declare */
-export type PresetMode = "declare" | "process";
-
-const presetModesPath = (cwd: string): string => join(cwd, PRESETS_DIR, ".liyuan", "预设机制.json"); // i18n-ignore：文件名协议
-
-function readPresetModes(cwd: string): Record<string, PresetMode> {
-	try {
-		const raw = JSON.parse(readFileSync(presetModesPath(cwd), "utf8")) as Record<string, unknown>;
-		const out: Record<string, PresetMode> = {};
-		for (const [k, v] of Object.entries(raw)) {
-			if (v === "declare" || v === "process") out[k] = v;
-		}
-		return out;
-	} catch {
-		return {};
-	}
-}
-
-const presetModeOf = (cwd: string, presetName: string): PresetMode => readPresetModes(cwd)[presetName] ?? "declare";
-
-function setPresetMode(cwd: string, presetName: string, mode: PresetMode): void {
-	const all = readPresetModes(cwd);
-	if (mode === "declare") delete all[presetName]; // 默认值不落盘，表里只记例外
-	else all[presetName] = mode;
-	mkdirSync(dirname(presetModesPath(cwd)), { recursive: true });
-	writeFileSync(presetModesPath(cwd), JSON.stringify(all, null, "\t"), "utf8");
-}
-
-/** 处理留档（机制二）：一份预设一份档，按原文指纹命中复用；换卡只做机械落盘 */
-const processStorePath = (cwd: string, presetName: string): string =>
-	join(cwd, PRESETS_DIR, ".liyuan", `预设处理-${presetSlug(presetName)}.json`); // i18n-ignore：文件名协议
-
-/** 处理失败留档（实弹教训：只报 toast 不够定位）——存响应原文头尾＋解析报错，成功即删 */
-const processFailurePath = (cwd: string, presetName: string): string =>
-	join(cwd, PRESETS_DIR, ".liyuan", `预设处理失败-${presetSlug(presetName)}.json`); // i18n-ignore：文件名协议
-
-export interface ProcessFailureRecord {
-	version: 1;
-	preset: string;
-	fingerprint: string;
-	error: string;
-	failedAt: string;
-	responseHead?: string;
-	responseTail?: string;
-	responseChars?: number;
-	parseError?: string;
-}
-
-/** 处理失败后的退避（同一预设 60 秒内不再问模型）；显式重新装载绕过 */
-const processFailedAt = new Map<string, number>();
-const PROCESS_RETRY_MS = 60_000;
-
-const readProcessStore = (abs: string): PresetProcessStore | null => {
-	if (!existsSync(abs)) return null;
-	try {
-		return JSON.parse(readFileSync(abs, "utf8")) as PresetProcessStore;
-	} catch {
-		return null;
-	}
-};
-
-const writeProcessStore = (abs: string, store: PresetProcessStore): void => {
-	mkdirSync(dirname(abs), { recursive: true });
-	writeFileSync(abs, JSON.stringify(store, null, "\t"), "utf8");
-};
-
-const writeProcessFailure = (abs: string, rec: ProcessFailureRecord): void => {
-	mkdirSync(dirname(abs), { recursive: true });
-	writeFileSync(abs, JSON.stringify(rec, null, "\t"), "utf8");
-};
-
-const clearProcessFailure = (abs: string): void => {
-	if (existsSync(abs)) {
-		try {
-			unlinkSync(abs);
-		} catch {
-			/* ignore */
-		}
-	}
-};
 
 /** 两份文件的条目级合并：先剥旧预设条目再追加；产物相同不写；剥空了就删文件（那份本就是我们生成的） */
 function mergePresetEntriesInto(path: string, section: string, base: string): { changed: boolean } {
@@ -1302,9 +1229,6 @@ export async function syncPresetTranslation(
 		const a = mergePresetEntriesInto(appendPath, "", "");
 		const b = mergePresetEntriesInto(agentsAbs, "", "");
 		return { state: a.changed || b.changed ? "stripped" : "none" };
-	}
-	if (presetModeOf(cwd, doc.name) === "process") {
-		return await syncPresetProcess(cwd, deps, opts, { doc, appendPath, agentsAbs });
 	}
 	const card = loadCardFile(resolvePath(cwd, config.card));
 	const macro = { charName: card.name, userName: config.userName };
@@ -1462,10 +1386,11 @@ export function syncLorebookMirror(cwd: string): { state: "none" | "unchanged" |
 	const bookOf = bookOfEntries(mountedLorebookPaths(config).map((rel) => resolvePath(cwd, rel)));
 	const used = new Set<string>();
 	const mirror: string[] = [];
-	for (const e of constantLoreOf(materials)) {
+	const allConstant = materials.entries.filter((e) => e.constant).sort((a, b) => a.order - b.order);
+	for (const e of allConstant) {
 		const book = bookOf(e) ?? "补充设定"; // i18n-ignore：镜像进 AGENTS.md，送模
 		const title = (e.comment || e.keys?.[0] || `条目 ${e.uid}`).trim(); // i18n-ignore：送模
-		mirror.push(formatEntry(uniqueEntryName(title, lorebookSourceSuffix(book), used), e.content));
+		mirror.push(formatEntry(uniqueEntryName(title, lorebookSourceSuffix(book), used), e.content, e.enabled));
 	}
 	const raw = readFileSync(agentsAbs, "utf8");
 	const strippedLore = stripEntriesWhere(raw, (e) => e.source?.kind === "lorebook");
@@ -1478,7 +1403,219 @@ export function syncLorebookMirror(cwd: string): { state: "none" | "unchanged" |
 	return { state: "written", entries: mirror.length };
 }
 
-/** 配置刷新时的卡文件对账：预设转译（按预设自选机制）+ 世界书镜像（各认自己的来源后缀，互不相扰） */
+/**
+ * 局部提示词反向同步（用户修改 APPEND_SYSTEM.md 或 AGENTS.md 里的预设/世界书条目时，
+ * 同步修改对应的预设块与世界书源文件，避免紧随其后的 syncCardFiles 把修改覆盖回去）。
+ */
+export function syncBackFromCardPrompts(cwd: string, scope: "card" | "agents", nextMarkdown: string): void {
+	const nextEntries = parsePromptEntries(nextMarkdown);
+	const config = loadConfig(cwd);
+	const cardDir = dirname(resolvePath(cwd, config.card));
+	const card = loadCardFile(resolvePath(cwd, config.card));
+	const prevMarkdown = (() => {
+		if (scope === "card") {
+			const p = cardRulesPath(cardDir);
+			return existsSync(p) ? readFileSync(p, "utf8") : "";
+		}
+		const p = cardAgentsPath(cardDir);
+		if (existsSync(p)) return readFileSync(p, "utf8");
+		const materials = loadStageMaterials(cwd);
+		const bookOf = bookOfEntries(mountedLorebookPaths(config).map((rel) => resolvePath(cwd, rel)));
+		const allConstant = materials.entries.filter((e) => e.constant).sort((a, b) => a.order - b.order);
+		return projectCardToAgents(materials.card, allConstant, config, { bookOf });
+	})();
+	const prevEntries = parsePromptEntries(prevMarkdown);
+	const prevEntryNames = new Set(prevEntries.map((e) => e.name));
+	const prevEntriesMap = new Map(prevEntries.map((e) => [e.name, e]));
+
+	// 1. 反向同步（预设）条目
+	const { doc } = loadEffectivePreset(cwd);
+	if (doc && config.preset) {
+		const declAbs = declarationPath(cwd, doc.name);
+		let stored: PresetDeclaration | null = null;
+		if (existsSync(declAbs)) {
+			try {
+				stored = JSON.parse(readFileSync(declAbs, "utf8")) as PresetDeclaration;
+			} catch {
+				stored = null;
+			}
+		}
+		if (!stored) {
+			const legacyAbs = legacyDeclarationPath(cardDir, doc.name);
+			if (existsSync(legacyAbs)) {
+				try {
+					stored = JSON.parse(readFileSync(legacyAbs, "utf8")) as PresetDeclaration;
+				} catch {
+					stored = null;
+				}
+			}
+		}
+		const rawPieces = declarePieces(compilePreset(doc));
+		const evalPieces = declarePieces(assembleForDeclare(doc, { charName: card.name, userName: config.userName }));
+		const norm = normalizeDeclaration(
+			stored ?? { version: 1, preset: doc.name, createdAt: new Date().toISOString(), entries: [] },
+			rawPieces,
+		);
+		const stationOf = new Map(norm.entries.map((e) => [e.identifier, e]));
+
+		const appendNames = new Set<string>();
+		const agentsNames = new Set<string>();
+		const expectedPreset: Array<{
+			id: string;
+			target: "card" | "agents";
+			entryName: string;
+			evalText: string;
+			enabled: boolean;
+		}> = [];
+		for (const p of evalPieces) {
+			const decl = stationOf.get(p.id);
+			const station = decl?.station ?? "writing";
+			if (station === "wrapper") continue;
+			if (station === "identity") {
+				const entryName = uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, appendNames);
+				const enabled = decl?.enabled ?? true;
+				expectedPreset.push({ id: p.id, target: "card", entryName, evalText: p.text, enabled });
+			} else {
+				const entryName = uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, agentsNames);
+				const enabled = decl?.enabled ?? (station === "writing");
+				expectedPreset.push({ id: p.id, target: "agents", entryName, evalText: p.text, enabled });
+			}
+		}
+
+		const nextPresetMap = new Map(
+			nextEntries
+				.filter((e) => e.source?.kind === "preset" && e.name !== `预设提示词${PRESET_SOURCE_SUFFIX}`) // i18n-ignore：协议名
+				.map((e) => [e.name, e]),
+		);
+
+		const blockPatches: PresetBlockPatch[] = [];
+		const contentChangedIds = new Set<string>();
+		const enabledChanged = new Map<string, boolean>();
+
+		for (const item of expectedPreset.filter((x) => x.target === scope)) {
+			const hit = nextPresetMap.get(item.entryName);
+			if (!hit) {
+				if (prevEntryNames.has(item.entryName)) {
+					blockPatches.push({ id: item.id, remove: true });
+				}
+				continue;
+			}
+			const prevHit = prevEntriesMap.get(item.entryName);
+			const currentEscaped = prevHit ? prevHit.content.trim() : escapeEntryText(item.evalText.trim());
+			if (hit.content.trim() !== currentEscaped) {
+				const unescaped = hit.content.replace(/^＃(\s)/gm, "#$1");
+				blockPatches.push({ id: item.id, content: unescaped });
+				contentChangedIds.add(item.id);
+			}
+			const prevEnabled = prevHit ? prevHit.enabled : item.enabled;
+			if (hit.enabled !== prevEnabled) {
+				enabledChanged.set(item.id, hit.enabled);
+			}
+		}
+
+		if (blockPatches.length > 0) {
+			const nextRaw = patchPresetRaw(doc, { blocks: blockPatches });
+			const presetAbs = resolvePath(cwd, config.preset);
+			if (existsSync(presetAbs)) {
+				writeJsonWithBackup(presetAbs, nextRaw);
+			}
+			const ovr = presetOverridePath(cwd);
+			if (existsSync(ovr)) {
+				writeFileSync(ovr, `${JSON.stringify(nextRaw, null, "\t")}\n`, "utf8");
+			}
+		}
+
+		if (blockPatches.length > 0 || enabledChanged.size > 0) {
+			const updatedDoc = loadEffectivePreset(cwd).doc ?? doc;
+			const updatedPieces = declarePieces(compilePreset(updatedDoc));
+			const updatedMap = new Map(updatedPieces.map((p) => [p.id, p]));
+			const nextDeclEntries: DeclareEntry[] = [];
+			for (const e of norm.entries) {
+				const p = updatedMap.get(e.identifier);
+				if (!p) continue;
+				const nextEnabled = enabledChanged.has(e.identifier) ? enabledChanged.get(e.identifier) : e.enabled;
+				const nextHash = contentChangedIds.has(e.identifier) || e.sourceHash ? declarePieceHash(p) : undefined;
+				nextDeclEntries.push({
+					...e,
+					chars: p.text.length,
+					...(typeof nextEnabled === "boolean" ? { enabled: nextEnabled } : {}),
+					...(nextHash ? { sourceHash: nextHash } : {}),
+				});
+			}
+			mkdirSync(dirname(declAbs), { recursive: true });
+			writeFileSync(
+				declAbs,
+				JSON.stringify(
+					{
+						version: 1,
+						preset: updatedDoc.name,
+						createdAt: stored?.createdAt ?? new Date().toISOString(),
+						...(stored?.model ? { model: stored.model } : {}),
+						entries: nextDeclEntries,
+					},
+					null,
+					"\t",
+				),
+				"utf8",
+			);
+		}
+	}
+
+	// 2. 反向同步（世界书·书名）条目（仅 AGENTS.md）
+	if (scope === "agents") {
+		const materials = loadStageMaterials(cwd);
+		const bookOf = bookOfEntries(mountedLorebookPaths(config).map((rel) => resolvePath(cwd, rel)));
+		const allConstant = materials.entries.filter((e) => e.constant).sort((a, b) => a.order - b.order);
+		const used = new Set<string>();
+		const expectedLore: Array<{
+			entryName: string;
+			entry: typeof allConstant[number];
+			fp: string;
+		}> = [];
+		for (const e of allConstant) {
+			const book = bookOf(e) ?? "补充设定"; // i18n-ignore
+			const title = (e.comment || e.keys?.[0] || `条目 ${e.uid}`).trim(); // i18n-ignore
+			const entryName = uniqueEntryName(title, lorebookSourceSuffix(book), used);
+			expectedLore.push({ entryName, entry: e, fp: loreFingerprint(e.content) });
+		}
+
+		const nextLoreMap = new Map(
+			nextEntries
+				.filter((e) => e.source?.kind === "lorebook")
+				.map((e) => [e.name, e]),
+		);
+
+		for (const item of expectedLore) {
+			const hit = nextLoreMap.get(item.entryName);
+			if (!hit) {
+				if (prevEntryNames.has(item.entryName)) {
+					deleteLoreEntryAnywhere(cwd, loadConfig(cwd), item.fp);
+				}
+				continue;
+			}
+			const prevHit = prevEntriesMap.get(item.entryName);
+			const prevEnabled = prevHit ? prevHit.enabled : item.entry.enabled;
+			if (hit.enabled !== prevEnabled) {
+				const curCfg = loadConfig(cwd);
+				const nextDisabled = toggleDisabledLore(curCfg.disabledLore, [item.fp], hit.enabled);
+				const nextCfgObj = { ...curCfg } as Record<string, unknown>;
+				if (nextDisabled.length > 0) nextCfgObj.disabledLore = nextDisabled;
+				else delete nextCfgObj.disabledLore;
+				writeJsonWithBackup(configPath(cwd), nextCfgObj);
+				if (hit.enabled) {
+					patchLoreEntryAnywhere(cwd, loadConfig(cwd), item.fp, { enabled: true });
+				}
+			}
+			const currentEscaped = prevHit ? prevHit.content.trim() : escapeEntryText(item.entry.content.trim());
+			if (hit.content.trim() !== currentEscaped) {
+				const unescaped = hit.content.replace(/^＃(\s)/gm, "#$1");
+				patchLoreEntryAnywhere(cwd, loadConfig(cwd), item.fp, { content: unescaped });
+			}
+		}
+	}
+}
+
+/** 配置刷新时的卡文件对账：预设转译 + 世界书镜像（各认自己的来源后缀，互不相扰） */
 export async function syncCardFiles(
 	cwd: string,
 	deps: PresetSyncDeps,
@@ -1487,159 +1624,6 @@ export async function syncCardFiles(
 	const preset = await syncPresetTranslation(cwd, deps, opts);
 	const lore = syncLorebookMirror(cwd);
 	return { preset, lore };
-}
-
-/**
- * 机制二：模型处理（syncPresetTranslation 的 process 分支主体）。
- * 留档按指纹命中即复用（换卡只做机械落盘）；拨开关只改指纹、产物沿用留档标 stale；
- * 留档缺失时**不烧模型**——剥净＋needProcess 提示，等用户点「重新装载」（opts.reprocess 才真跑）。
- */
-async function syncPresetProcess(
-	cwd: string,
-	deps: PresetSyncDeps,
-	opts: { reprocess?: boolean },
-	ctx: { doc: PresetDoc; appendPath: string; agentsAbs: string },
-): Promise<PresetSyncResult> {
-	const { doc, appendPath, agentsAbs } = ctx;
-	const config = loadConfig(cwd);
-	const cardDir = dirname(resolvePath(cwd, config.card));
-	const card = loadCardFile(resolvePath(cwd, config.card));
-	const macro = { charName: card.name, userName: config.userName };
-	const compiled = compilePreset(doc);
-	const pieces = compiledPieces(compiled);
-	const fingerprint = presetFingerprint(doc);
-
-	const storeAbs = processStorePath(cwd, doc.name);
-	const failAbs = processFailurePath(cwd, doc.name);
-	let store = readProcessStore(storeAbs);
-	let processed = false;
-	let processError: string | undefined;
-	if (!store || opts.reprocess) {
-		const failedAt = processFailedAt.get(doc.name) ?? 0;
-		if (!opts.reprocess && Date.now() - failedAt < PROCESS_RETRY_MS) {
-			processError = t("处理模型刚失败过，稍后再试");
-		} else if (pieces.length === 0) {
-			// 全关/零料：空产物也落档，别让每次装载都惦记
-			store = {
-				version: 1,
-				preset: doc.name,
-				fingerprint,
-				identity: "",
-				writing: "",
-				dropped: [],
-				model: deps.modelLabel,
-				createdAt: new Date().toISOString(),
-			};
-			processed = true;
-			writeProcessStore(storeAbs, store);
-			clearProcessFailure(failAbs);
-		} else {
-			const prompt = buildProcessPrompt(pieces, { preset: doc.name });
-			const resp = await deps.runSideText(prompt.systemPrompt, prompt.userText, {
-				maxTokens: 32768,
-				reasoning: "low",
-				signal: AbortSignal.timeout(600_000),
-			});
-			if (typeof resp === "string") {
-				const { value: parsed, parseError } = parseProcessResponseWithError(resp);
-				if (parsed) {
-					processFailedAt.delete(doc.name);
-					store = {
-						version: 1,
-						preset: doc.name,
-						fingerprint,
-						identity: parsed.identity,
-						writing: parsed.writing,
-						dropped: parsed.dropped,
-						model: deps.modelLabel,
-						createdAt: new Date().toISOString(),
-					};
-					processed = true;
-					writeProcessStore(storeAbs, store);
-					clearProcessFailure(failAbs);
-				} else {
-					processFailedAt.set(doc.name, Date.now());
-					processError = t("处理响应不可解析");
-					writeProcessFailure(failAbs, {
-						version: 1,
-						preset: doc.name,
-						fingerprint,
-						error: processError,
-						failedAt: new Date().toISOString(),
-						responseHead: resp.slice(0, 1200),
-						responseTail: resp.slice(-400),
-						responseChars: resp.length,
-						...(parseError ? { parseError } : {}),
-					});
-				}
-			} else {
-				processFailedAt.set(doc.name, Date.now());
-				processError = resp.error;
-				writeProcessFailure(failAbs, {
-					version: 1,
-					preset: doc.name,
-					fingerprint,
-					error: processError,
-					failedAt: new Date().toISOString(),
-				});
-			}
-		}
-	}
-	if (!store) {
-		// 无留档（从未处理/处理失败）：剥净＋提示——后台刷新绝不烧模型
-		const a = mergePresetEntriesInto(appendPath, "", "");
-		const b = mergePresetEntriesInto(agentsAbs, "", "");
-		return {
-			state: a.changed || b.changed ? "stripped" : "none",
-			preset: doc.name,
-			mode: "process",
-			processed,
-			processError,
-			needProcess: true,
-		};
-	}
-
-	const entries = processIntoEntries(store, macro);
-	// 无档案的卡：投影打底——档案一落盘卡即进文件模式（刀3）。
-	// 投影底稿只给卡自己的内容（世界书由紧随其后的 syncLorebookMirror 独立镜像持有，不硬编码抄进档案）
-	let agentsBase = "";
-	if (!existsSync(agentsAbs) && entries.agentsSection) {
-		const materials = loadStageMaterials(cwd);
-		agentsBase = projectCardToAgents(materials.card, [], config);
-	}
-	const a = mergePresetEntriesInto(appendPath, entries.appendMarkdown, "");
-	const b = mergePresetEntriesInto(agentsAbs, entries.agentsSection, agentsBase);
-	if (a.changed || b.changed || processed) {
-		const reportAbs = join(cardDir, ".liyuan", `处理报告-${presetSlug(doc.name)}.md`); // i18n-ignore：文件名协议
-		mkdirSync(dirname(reportAbs), { recursive: true });
-		writeFileSync(
-			reportAbs,
-			processReport(
-				doc,
-				{
-					identityChars: entries.identityChars,
-					writingChars: entries.writingChars,
-					dropped: store.dropped,
-					unsupportedMacros: entries.unsupportedMacros,
-					usesLastUserMessage: compiled.usesLastUserMessage,
-					disabledCount: compiled.report.filter((it) => it.action === "关闭").length, // i18n-ignore：与处理报告数据比对
-				},
-				store,
-				config.preset ?? doc.name,
-			),
-			"utf8",
-		);
-	}
-	return {
-		state: a.changed || b.changed ? "written" : "unchanged",
-		preset: doc.name,
-		mode: "process",
-		identityChars: entries.identityChars,
-		writingChars: entries.writingChars,
-		processed,
-		processError,
-		stale: store.fingerprint !== fingerprint,
-	};
 }
 
 // ---------- 世界书文件管理（PLAN-PANELS-V2 §2.3：选书/导入/删除） ----------
@@ -1957,14 +1941,38 @@ export function createCardFile(cwd: string, input: NewCardInput): { name: string
 }
 
 /**
- * 换卡：验卡 → 写 config（清掉随卡走的 displayName/greetingIndex）→ 按卡投影身份 → 切/建会话。
- * **世界书与角色卡解耦**：不碰 lorebooks / disabledLore（条目启停跨卡保留）。
+ * 若目标角色卡在 `cards/<卡>/卡.json` 中保存了专属 `lorebooks`，切换卡片时自动应用该列表
+ * （过滤掉磁盘上已不存在的文件）；未保存过则保留当前挂载不变。
+ */
+function applySavedCardLorebooks(cwd: string, cardPath: string, config: Record<string, unknown>): void {
+	const space = resolveCardSpace(cwd, cardPath);
+	if (!space) return;
+	const cardCfg = loadCardConfig(space.dir);
+	if (!Array.isArray(cardCfg.lorebooks)) return;
+	const valid = cardCfg.lorebooks
+		.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+		.map((p) => p.replace(/\\/g, "/"))
+		.filter((p) => existsSync(resolvePath(cwd, p)));
+	Object.assign(config, setMountedLorebooks(config as unknown as RpConfig, valid));
+}
+
+function syncLockedCardLorebooksIfAny(cwd: string, cardPath: string, paths: string[]): void {
+	const space = resolveCardSpace(cwd, cardPath);
+	if (!space) return;
+	if (Array.isArray(loadCardConfig(space.dir).lorebooks)) {
+		saveCardConfig(space.dir, { lorebooks: paths });
+	}
+}
+
+/**
+ * 换卡：验卡 → 写 config（清掉随卡走的 displayName/greetingIndex）→ 按卡投影身份与已保存世界书 → 切/建会话。
  * POST /api/card/switch 与 `card_switch` 工具共用此函数。
  */
 export async function selectCard(
 	cwd: string,
 	host: RestHost,
 	cardPath: string,
+	opts?: { switchSession?: boolean },
 ): Promise<{ name: string; path: string; result: "switched" | "created"; embeddedLoreCount: number; persona: string | null; promoted: boolean }> {
 	const card = loadCardFile(resolvePath(cwd, cardPath)); // 先验卡，坏卡不落盘
 	const config = loadConfig(cwd) as unknown as Record<string, unknown>;
@@ -1980,10 +1988,11 @@ export async function selectCard(
 	delete config.displayName;
 	delete config.greetingIndex;
 	config.card = finalPath;
+	applySavedCardLorebooks(cwd, finalPath, config);
 	writeJsonWithBackup(configPath(cwd), config);
 	const persona = personaForCard(loadPersonas(cwd), finalPath);
 	if (persona) projectPersonaToConfig(cwd, persona);
-	const result = await host.switchToCard();
+	const result = await host.switchToCard(opts);
 	return {
 		name: card.name,
 		path: finalPath,
@@ -2932,6 +2941,60 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				sendJson(res, 200, { ok: true });
 				return true;
 			}
+			// 项目级 .md 资产列举（APPEND_SYSTEM.md / 前情提要.md / 记忆/*.md）
+			case "GET /api/chats/assets": {
+				const chatId = (query.get("chatId") ?? host.currentChatId() ?? "").trim();
+				if (!chatId || !chatIdOk(chatId)) throw new Error(t("chatId 不合法"));
+				const space = resolveCardSpace(host.cwd, loadConfig(host.cwd).card);
+				if (!space) {
+					sendJson(res, 200, { ok: true, chatId, assets: [] });
+					return true;
+				}
+				const cDir = chatDirOf(space.dir, chatId);
+				sendJson(res, 200, { ok: true, chatId, assets: listChatMarkdownAssets(cDir) });
+				return true;
+			}
+			case "GET /api/chats/asset": {
+				const chatId = (query.get("chatId") ?? host.currentChatId() ?? "").trim();
+				const rel = (query.get("path") ?? "").trim().replace(/\\/g, "/");
+				if (!chatId || !chatIdOk(chatId) || !rel || !rel.toLowerCase().endsWith(".md")) throw new Error(t("参数不合法"));
+				const space = resolveCardSpace(host.cwd, loadConfig(host.cwd).card);
+				if (!space) throw new Error(t("当前卡不在 cards/（老布局没有对话层）"));
+				const cDir = chatDirOf(space.dir, chatId);
+				const target = resolve(cDir, rel);
+				if (!insidePath(cDir, target)) throw new Error(t("路径越界"));
+				const content = existsSync(target) ? readFileSync(target, "utf8") : "";
+				sendJson(res, 200, { ok: true, chatId, path: rel, content });
+				return true;
+			}
+			case "PUT /api/chats/asset": {
+				const body = JSON.parse(await readBody(req)) as { chatId?: string; path?: string; content?: string };
+				const chatId = (body.chatId ?? host.currentChatId() ?? "").trim();
+				const rel = (body.path ?? "").trim().replace(/\\/g, "/");
+				if (!chatId || !chatIdOk(chatId) || !rel || !rel.toLowerCase().endsWith(".md")) throw new Error(t("参数不合法"));
+				const space = resolveCardSpace(host.cwd, loadConfig(host.cwd).card);
+				if (!space) throw new Error(t("当前卡不在 cards/（老布局没有对话层）"));
+				const cDir = chatDirOf(space.dir, chatId);
+				const target = resolve(cDir, rel);
+				if (!insidePath(cDir, target)) throw new Error(t("路径越界"));
+				mkdirSync(dirname(target), { recursive: true });
+				writeFileSync(target, typeof body.content === "string" ? body.content : "", "utf8");
+				sendJson(res, 200, { ok: true, chatId, path: rel, assets: listChatMarkdownAssets(cDir) });
+				return true;
+			}
+			case "DELETE /api/chats/asset": {
+				const chatId = (query.get("chatId") ?? host.currentChatId() ?? "").trim();
+				const rel = (query.get("path") ?? "").trim().replace(/\\/g, "/");
+				if (!chatId || !chatIdOk(chatId) || !rel || !rel.toLowerCase().endsWith(".md")) throw new Error(t("参数不合法"));
+				const space = resolveCardSpace(host.cwd, loadConfig(host.cwd).card);
+				if (!space) throw new Error(t("当前卡不在 cards/（老布局没有对话层）"));
+				const cDir = chatDirOf(space.dir, chatId);
+				const target = resolve(cDir, rel);
+				if (!insidePath(cDir, target)) throw new Error(t("路径越界"));
+				if (existsSync(target)) unlinkSync(target);
+				sendJson(res, 200, { ok: true, chatId, assets: listChatMarkdownAssets(cDir) });
+				return true;
+			}
 			case "DELETE /api/sessions": {
 				if (refuseWhileStreaming()) return true;
 				// path 可给多个（面板多选删除）：一次请求、一条回执——逐条删会连甩 N 个气泡。
@@ -3147,6 +3210,7 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					delete raw.displayName;
 					delete raw.greetingIndex;
 					raw.card = fallbackPath;
+					applySavedCardLorebooks(host.cwd, fallbackPath, raw);
 					writeJsonWithBackup(configPath(host.cwd), raw);
 					const persona = personaForCard(loadPersonas(host.cwd), fallbackPath);
 					if (persona) projectPersonaToConfig(host.cwd, persona);
@@ -3154,6 +3218,10 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					switchedTo = fallbackPath;
 					config = loadConfig(host.cwd);
 				}
+
+				// 删卡本体前先记下卡工作空间与子项目数（卡本体一删 resolveCardSpace 就不认了）
+				const space = resolveCardSpace(host.cwd, p);
+				const spaceChatCount = space ? listChats(space.dir).length : 0;
 
 				// 卡本体（JSON 卡的侧挂封面跟着卡走，留着就是孤儿裸图）
 				deleteAssetOrFile(host.cwd, abs);
@@ -3191,11 +3259,19 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					deletedLore = gone.length;
 				}
 
-				// 相关数据：会话 + 补充设定集 + persona 卡锁定（保留则重新导入同路径卡即无缝续玩）
+				// 相关数据：会话 + 补充设定集 + persona 卡锁定 + 整棵 cards/<卡>/ 目录（保留则重新导入同路径卡即无缝续玩）
 				let deletedSessions = 0;
 				if (wantData) {
 					deletedSessions = await host.deleteCardSessions(p);
-					const overlay = overlayPathFor(host.cwd, cardName, config.card);
+					if (space && existsSync(space.dir)) {
+						try {
+							rmSync(space.dir, { recursive: true, force: true });
+							deletedSessions += spaceChatCount;
+						} catch {
+							/* 不挡 */
+						}
+					}
+					const overlay = overlayPathFor(host.cwd, cardName, p);
 					if (existsSync(overlay)) {
 						try {
 							unlinkSync(overlay);
@@ -3389,24 +3465,10 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 			// ---- 多预设管理（PLAN-PANELS-V2 §2.6） ----
 			case "GET /api/presets": {
 				const config = loadConfig(host.cwd);
-				const modes = readPresetModes(host.cwd);
 				sendJson(res, 200, {
 					active: config.preset ?? null,
-					presets: listPresetFiles(host.cwd).map((p) => ({ ...p, mode: modes[p.name] ?? "declare" })),
+					presets: listPresetFiles(host.cwd),
 				});
-				return true;
-			}
-			/** 机制自选（2026-09-14 用户定案）：declare＝声明分类（默认，30 秒级）；process＝模型处理（分钟级，产物两条） */
-			case "PUT /api/presets/mode": {
-				if (refuseWhileStreaming()) return true;
-				const body = JSON.parse(await readBody(req)) as { file?: string; mode?: string };
-				const file = validatePresetPath(body.file ?? "");
-				if (body.mode !== "declare" && body.mode !== "process") throw new Error(t("mode 必须是 declare 或 process"));
-				if (!existsSync(resolvePath(host.cwd, file))) throw new Error(t("预设文件不存在：{file}", { file }));
-				setPresetMode(host.cwd, presetNameFromFile(file), body.mode);
-				const config = loadConfig(host.cwd);
-				if (config.preset === file) await host.softRefreshConfig();
-				sendJson(res, 200, { ok: true });
 				return true;
 			}
 			case "POST /api/presets/select": {
@@ -3414,26 +3476,18 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				const body = JSON.parse(await readBody(req)) as { file?: string | null; redeclare?: boolean };
 				// 切换（含“丢弃未保存草稿”）归 selectPresetFile，与 preset_select 工具共用
 				if (!selectPresetFile(host.cwd, body.file ?? null)) throw new Error(t("预设文件不存在"));
-				// 重新装载按机制分流：声明＝丢弃声明缓存全部重问（30 秒级）；
-				// 处理＝强制重跑处理模型（分钟级，按钮在等、完成有 toast）。
-				// 处理机制的普通装载（首装缺留档）也跑一次——用户正盯着按钮。
-				let reprocess = false;
-				if (body.file) {
+				if (body.file && body.redeclare) {
 					const name = presetNameFromFile(body.file);
-					if (presetModeOf(host.cwd, name) === "process") {
-						reprocess = body.redeclare === true || !readProcessStore(processStorePath(host.cwd, name));
-					} else if (body.redeclare) {
-						const declAbs = declarationPath(host.cwd, name);
-						if (existsSync(declAbs)) {
-							try {
-								unlinkSync(declAbs);
-							} catch {
-								/* ignore */
-							}
+					const declAbs = declarationPath(host.cwd, name);
+					if (existsSync(declAbs)) {
+						try {
+							unlinkSync(declAbs);
+						} catch {
+							/* ignore */
 						}
 					}
 				}
-				await host.softRefreshConfig(reprocess ? { reprocessPreset: true } : undefined);
+				await host.softRefreshConfig();
 				sendJson(res, 200, { ok: true });
 				return true;
 			}
@@ -3575,17 +3629,123 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				sendJson(res, 200, { name: presetNameFromFile(file), json: JSON.parse(readFileSync(abs, "utf8")) });
 				return true;
 			}
-			// ---- 用户提示词（刀2/前端重构）：SYSTEM.md + 两级 APPEND_SYSTEM.md ----
+			// ---- 用户提示词（刀2/前端重构）：SYSTEM.md + 全局追加（扮演/写作/助手）+ 卡级 APPEND_SYSTEM.md ----
 			case "GET /api/rules": {
 				const config = loadConfig(host.cwd);
 				const cardDir = dirname(resolvePath(host.cwd, config.card));
 				const rules = readUserRules(cardDir);
+				const readGlobalSlot = (p: string, shippedName: string): string => {
+					if (existsSync(p)) return readFileSync(p, "utf8");
+					const shippedAbs = resolvePath(host.cwd, `assets/${shippedName}`);
+					if (existsSync(shippedAbs)) return readFileSync(shippedAbs, "utf8");
+					try {
+						return readFileSync(new URL(`../assets/${shippedName}`, import.meta.url), "utf8");
+					} catch {
+						return "";
+					}
+				};
 				sendJson(res, 200, {
-					global: { content: rules.global, path: globalRulesPath() },
-					agent: { content: rules.agent, path: agentRulesPath() },
+					global: { content: readGlobalSlot(globalRulesPath(), "APPEND_SYSTEM.md"), path: globalRulesPath() },
+					agent: { content: readGlobalSlot(agentRulesPath(), "AGENT_APPEND_SYSTEM.md"), path: agentRulesPath() },
+					bot: { content: readGlobalSlot(botRulesPath(), "BOT.md"), path: botRulesPath() },
+					botPersonas: BOT_PERSONA_PRESETS,
 					card: { content: rules.card, path: cardRulesPath(cardDir), cardName: config.displayName ?? basename(config.card).replace(/\.(png|json)$/i, "") },
-					system: { content: existsSync(systemPromptPath()) ? readFileSync(systemPromptPath(), "utf8") : "", path: systemPromptPath() },
+					system: { content: readGlobalSlot(systemPromptPath(), "SYSTEM.md"), path: systemPromptPath() },
 				});
+				return true;
+			}
+			case "GET /api/bot/personas": {
+				sendJson(res, 200, { personas: BOT_PERSONA_PRESETS });
+				return true;
+			}
+			case "GET /api/bot/sessions": {
+				if (!host.botSnapshot) throw new Error(t("副编剧运行时未接入"));
+				sendJson(res, 200, host.botSnapshot()); return true;
+			}
+			case "POST /api/bot/sessions": {
+				if (!host.manageBot) throw new Error(t("副编剧运行时未接入"));
+				const body = JSON.parse(await readBody(req));
+				if (!body || !["list", "new", "open", "rename", "delete", "model", "compact", "stop"].includes(body.action)) throw new Error(t("副编剧会话操作无效"));
+				sendJson(res, 200, await host.manageBot(body)); return true;
+			}
+			case "GET /api/bot/settings": {
+				const config = loadConfig(host.cwd);
+				const cardDir = dirname(resolvePath(host.cwd, config.card));
+				const cardBotPath = join(cardDir, BOT_PERSONA_FILE);
+				const globalBotPath = botRulesPath();
+				const readClean = (p: string): string => {
+					if (!existsSync(p)) return "";
+					try {
+						const raw = readFileSync(p, "utf8").trim();
+						if (raw.includes("你是这张卡的幕后副编剧，服务于这一局扮演的戏外工作") || raw.includes("<style_guide>")) { // i18n-ignore
+							return BOT_PERSONA_PRESETS[0]!.content;
+						}
+						return raw;
+					} catch {
+						return "";
+					}
+				};
+				const globalPersona = readClean(globalBotPath) || BOT_PERSONA_PRESETS[0]!.content;
+				const cardPersona = readClean(cardBotPath);
+				sendJson(res, 200, {
+					personas: BOT_PERSONA_PRESETS,
+					globalPersona,
+					cardPersona,
+					activeScope: cardPersona ? "card" : "global",
+					cardName: config.displayName ?? basename(config.card).replace(/\.(png|json)$/i, ""),
+					botViewBeats: typeof config.botViewBeats === "number" && config.botViewBeats > 0 ? Math.floor(config.botViewBeats) : 0,
+				});
+				return true;
+			}
+			case "PUT /api/bot/settings": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					scope?: "global" | "card";
+					content?: string;
+					botViewBeats?: number;
+				};
+				const config = loadConfig(host.cwd);
+				const cardDir = dirname(resolvePath(host.cwd, config.card));
+				if (typeof body.content === "string") {
+					const trimmed = body.content.trim();
+					if (body.scope === "card") {
+						const cardBotPath = join(cardDir, BOT_PERSONA_FILE);
+						if (!trimmed) {
+							if (existsSync(cardBotPath)) rmSync(cardBotPath, { force: true });
+						} else {
+							mkdirSync(cardDir, { recursive: true });
+							writeFileSync(cardBotPath, trimmed + "\n", "utf8");
+						}
+					} else {
+						const globalBotPath = botRulesPath();
+						mkdirSync(dirname(globalBotPath), { recursive: true });
+						writeFileSync(globalBotPath, (trimmed || BOT_PERSONA_PRESETS[0]!.content) + "\n", "utf8");
+					}
+				}
+				if (typeof body.botViewBeats === "number" && Number.isFinite(body.botViewBeats)) {
+					const beats = Math.max(0, Math.floor(body.botViewBeats));
+					if (beats > 0) config.botViewBeats = beats;
+					else delete config.botViewBeats;
+					writeJsonWithBackup(configPath(host.cwd), config);
+				}
+				await host.softRefreshConfig();
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/bot/persona": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as { presetId?: string; scope?: "global" | "card" };
+				const preset = BOT_PERSONA_PRESETS.find((p) => p.id === body.presetId);
+				if (!preset) throw new Error(t("未知副编剧人设模板"));
+				const config = loadConfig(host.cwd);
+				const abs =
+					body.scope === "card"
+						? join(dirname(resolvePath(host.cwd, config.card)), BOT_PERSONA_FILE)
+						: botRulesPath();
+				mkdirSync(dirname(abs), { recursive: true });
+				writeFileSync(abs, preset.content, "utf8");
+				await host.softRefreshConfig();
+				sendJson(res, 200, { ok: true, presetId: preset.id, name: preset.name, path: abs, content: preset.content });
 				return true;
 			}
 			case "PUT /api/rules": {
@@ -3603,12 +3763,16 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				} else if (body.scope === "agent") {
 					abs = agentRulesPath();
 					mkdirSync(rulesAgentDir(), { recursive: true });
+				} else if (body.scope === "bot") {
+					abs = botRulesPath();
+					mkdirSync(rulesAgentDir(), { recursive: true });
 				} else if (body.scope === "card") {
 					const cardDir = dirname(resolvePath(host.cwd, config.card));
 					mkdirSync(cardDir, { recursive: true });
 					abs = cardRulesPath(cardDir);
+					syncBackFromCardPrompts(host.cwd, "card", body.content);
 				} else {
-					throw new Error(t("scope 必须是 system、global、agent 或 card"));
+					throw new Error(t("scope 必须是 system、global、agent、bot 或 card"));
 				}
 				writeFileSync(abs, body.content, "utf8");
 				await host.softRefreshConfig();
@@ -3641,7 +3805,8 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				// 生效投影（diff 基准）：跑的就是装配那条路——协议判死/归属剥离都已在内；
 				// 蓝灯小节标题带 `（世界书·书名）`，与档案里的镜像条目同一形态（syncLorebookMirror）
 				const bookOf = bookOfEntries(mountedLorebookPaths(config).map((rel) => resolvePath(host.cwd, rel)));
-				const projection = projectCardToAgents(materials.card, constantLoreOf(materials), config, { bookOf });
+				const allConstant = materials.entries.filter((e) => e.constant).sort((a, b) => a.order - b.order);
+				const projection = projectCardToAgents(materials.card, allConstant, config, { bookOf });
 				// 生成素材：只给卡自己的内容——世界书由镜像同步持有，助手不必也不该把书抄进档案
 				const unfilteredProjection = projectCardToAgents(materials.card, [], config);
 				sendJson(res, 200, {
@@ -3665,9 +3830,11 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				const cardDir = dirname(resolvePath(host.cwd, config.card));
 				mkdirSync(cardDir, { recursive: true });
 				const abs = cardAgentsPath(cardDir);
+				syncBackFromCardPrompts(host.cwd, "agents", body.content);
 				writeFileSync(abs, body.content, "utf8");
 				await host.softRefreshConfig();
-				sendJson(res, 200, { ok: true, path: abs, chars: body.content.length });
+				const finalContent = existsSync(abs) ? readFileSync(abs, "utf8") : body.content;
+				sendJson(res, 200, { ok: true, path: abs, chars: finalContent.length });
 				return true;
 			}
 			/** 删除卡档案 ⇒ 回到自动投影（可随时重新生成） */
@@ -3731,12 +3898,16 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 			case "GET /api/lorebooks": {
 				const config = loadConfig(host.cwd);
 				const active = mountedLorebookPaths(config);
+				const space = resolveCardSpace(host.cwd, config.card);
+				const cardCfg = space ? loadCardConfig(space.dir) : {};
 				sendJson(res, 200, {
 					/** 多本同时挂载；兼容旧前端：active 现为 string[] */
 					active,
 					/** @deprecated 旧单本字段：取 active[0] 或 null */
 					activeOne: active[0] ?? null,
 					books: listLorebookFiles(host.cwd, config),
+					/** 当前角色卡是否已保存专属世界书选择（`cards/<卡>/卡.json` 的 `lorebooks`） */
+					lockedForCard: Array.isArray(cardCfg.lorebooks),
 				});
 				return true;
 			}
@@ -3745,7 +3916,7 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 			 * - { paths: string[] } 整体覆盖挂载列表（[] = 一本都不挂）
 			 * - { path, enabled?: boolean } 单本开关（默认 enabled=true 切换为挂上；enabled=false 卸下）
 			 * - { path: null } 清空全部挂载
-			 * 角色卡与世界书无关：本接口不碰 card。
+			 * - { lockToCard?: boolean } 是否将当前选择保存为当前角色卡的默认世界书（写入/移除 `卡.json` 的 `lorebooks`）
 			 */
 			case "POST /api/lorebooks/select": {
 				if (refuseWhileStreaming()) return true;
@@ -3753,6 +3924,7 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					path?: string | null;
 					paths?: string[];
 					enabled?: boolean;
+					lockToCard?: boolean;
 				};
 				const config = loadConfig(host.cwd);
 				const ensureBook = (p: string) => {
@@ -3762,6 +3934,7 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					}
 				};
 				let nextPaths: string[];
+				let pathsChanged = true;
 				if (Array.isArray(body.paths)) {
 					nextPaths = body.paths.map((p) => p.replace(/\\/g, "/")).filter(Boolean);
 					for (const p of nextPaths) ensureBook(p);
@@ -3779,13 +3952,35 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					} else if (on) cur.add(p);
 					else cur.delete(p);
 					nextPaths = [...cur];
+				} else if (typeof body.lockToCard === "boolean") {
+					nextPaths = mountedLorebookPaths(config);
+					pathsChanged = false;
 				} else {
 					throw new Error(t("缺少 path 或 paths"));
 				}
-				const next = setMountedLorebooks(config, nextPaths);
-				writeJsonWithBackup(configPath(host.cwd), next);
-				await host.softRefreshConfig();
-				sendJson(res, 200, { ok: true, active: nextPaths });
+				if (pathsChanged) {
+					const next = setMountedLorebooks(config, nextPaths);
+					writeJsonWithBackup(configPath(host.cwd), next);
+				}
+				const space = resolveCardSpace(host.cwd, config.card);
+				let lockedForCard = false;
+				if (space) {
+					const wasLocked = Array.isArray(loadCardConfig(space.dir).lorebooks);
+					if (body.lockToCard === true) {
+						saveCardConfig(space.dir, { lorebooks: nextPaths });
+						lockedForCard = true;
+					} else if (body.lockToCard === false) {
+						saveCardConfig(space.dir, { lorebooks: null });
+						lockedForCard = false;
+					} else if (wasLocked) {
+						saveCardConfig(space.dir, { lorebooks: nextPaths });
+						lockedForCard = true;
+					}
+				}
+				if (pathsChanged) {
+					await host.softRefreshConfig();
+				}
+				sendJson(res, 200, { ok: true, active: nextPaths, lockedForCard });
 				return true;
 			}
 			case "POST /api/lorebooks/import": {
@@ -3853,8 +4048,9 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					{ mount: body.mount !== false },
 				);
 				if (!created) throw new Error(t("同名世界书已存在：{name}", { name }));
-				await host.softRefreshConfig(); // 挂载变化影响注入，须重装
 				const didMount = created.mounted.includes(created.path);
+				if (didMount) syncLockedCardLorebooksIfAny(host.cwd, loadConfig(host.cwd).card, created.mounted);
+				await host.softRefreshConfig(); // 挂载变化影响注入，须重装
 				host.notify("info", t("世界书「{name}」已新建{mounted}", { name, mounted: didMount ? t("并挂载") : t("（未挂载）") }));
 				sendJson(res, 200, { ok: true, path: created.path, mounted: created.mounted, didMount });
 				return true;
@@ -3880,6 +4076,7 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					const next = setMountedLorebooks(config, remaining);
 					writeJsonWithBackup(configPath(host.cwd), next);
 				}
+				syncLockedCardLorebooksIfAny(host.cwd, config.card, remaining);
 				// 无论删除前是否挂载，删除后必须软刷新以对账 AGENTS.md 世界书镜像
 				await host.softRefreshConfig();
 				host.notify("info", t("世界书已移入回收站（世界书面板可还原）：{name}", { name: base }));
@@ -4442,6 +4639,11 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				const { config } = (await loadOrSeedAgentConfig(host));
 				if (!config.providers[name]) throw new Error(t("渠道不存在：{name}", { name }));
 				delete config.providers[name];
+				try {
+					deleteChannelFromProfiles(host.cwd, name);
+				} catch {
+					/* 仓库中无同名旧副本则忽略 */
+				}
 				if (config.defaultProvider === name) {
 					const first = Object.keys(config.providers)[0];
 					config.defaultProvider = first;
@@ -4453,9 +4655,15 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 				return true;
 			}
 			case "POST /api/channels/test": {
-				const body = JSON.parse(await readBody(req)) as { name?: string; baseUrl?: string; apiKey?: string };
+				const body = JSON.parse(await readBody(req)) as {
+					name?: string;
+					baseUrl?: string;
+					apiKey?: string;
+					headers?: Record<string, string>;
+				};
 				let baseUrl = (body.baseUrl ?? "").trim();
 				let apiKey = (body.apiKey ?? "").trim() || undefined;
+				let extraHeaders = body.headers;
 				const name = (body.name ?? "").trim();
 				if (name) {
 					const ch = (await loadOrSeedAgentConfig(host)).config.providers[name];
@@ -4465,9 +4673,12 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 						const k = typeof ch.apiKey === "string" ? ch.apiKey : "";
 						if (k && k !== "placeholder") apiKey = k; // $ENV 由 probe 解析
 					}
+					if (!extraHeaders && ch.headers && typeof ch.headers === "object" && !Array.isArray(ch.headers)) {
+						extraHeaders = ch.headers as Record<string, string>;
+					}
 				}
 				if (!baseUrl) throw new Error(t("缺少 name 或 baseUrl"));
-				const result = await probeModelsEndpoint(baseUrl, apiKey);
+				const result = await probeModelsEndpoint(baseUrl, apiKey, extraHeaders);
 				sendJson(res, 200, { ok: result.ok, status: result.status, detail: result.detail });
 				return true;
 			}
@@ -4476,10 +4687,12 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 					name?: string;
 					baseUrl?: string;
 					apiKey?: string;
+					headers?: Record<string, string>;
 					apply?: boolean;
 				};
 				let baseUrl = (body.baseUrl ?? "").trim();
 				let apiKey = (body.apiKey ?? "").trim() || undefined;
+				let extraHeaders = body.headers;
 				const name = (body.name ?? "").trim();
 				const loaded = name ? (await loadOrSeedAgentConfig(host)) : null;
 				const ch = name && loaded ? loaded.config.providers[name] : undefined;
@@ -4490,9 +4703,12 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 						const k = typeof ch.apiKey === "string" ? ch.apiKey : "";
 						if (k && k !== "placeholder") apiKey = k;
 					}
+					if (!extraHeaders && ch?.headers && typeof ch.headers === "object" && !Array.isArray(ch.headers)) {
+						extraHeaders = ch.headers as Record<string, string>;
+					}
 				}
 				if (!baseUrl) throw new Error(t("缺少 name 或 baseUrl"));
-				const result = await probeModelsEndpoint(baseUrl, apiKey);
+				const result = await probeModelsEndpoint(baseUrl, apiKey, extraHeaders);
 				if (!result.ok) throw new Error(t("拉取失败：{detail}", { detail: result.detail }));
 				if (result.ids.length === 0) throw new Error(t("渠道返回了空模型清单"));
 				const models = result.ids.map((id) => ({ id })) as AgentModelEntry[];
@@ -4526,11 +4742,13 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 			// ---- 角色卡 ----
 			case "GET /api/card": {
 				const config = loadConfig(host.cwd);
-				const card = loadCardFile(resolvePath(host.cwd, config.card));
+				const reqPath = (query.get("path") ?? "").trim() || config.card;
+				const isCurrentCard = sameCardPath(reqPath, config.card, host.cwd);
+				const card = loadCardFile(resolvePath(host.cwd, reqPath));
 				sendJson(res, 200, {
-					path: config.card,
-					displayName: config.displayName ?? null,
-					greetingIndex: config.greetingIndex ?? 0,
+					path: reqPath,
+					displayName: isCurrentCard ? (config.displayName ?? null) : null,
+					greetingIndex: isCurrentCard ? (config.greetingIndex ?? 0) : 0,
 					name: card.name,
 					description: card.description,
 					personality: card.personality,
@@ -4567,15 +4785,18 @@ async function routeApiRequest(req: IncomingMessage, res: ServerResponse, host: 
 			}
 			case "POST /api/card/switch": {
 				if (refuseWhileStreaming()) return true;
-				const body = JSON.parse(await readBody(req)) as { card?: string };
+				const body = JSON.parse(await readBody(req)) as { card?: string; switchSession?: boolean };
 				const cardPath = (body.card ?? "").trim();
 				if (!cardPath) throw new Error(t("缺少 card 路径"));
+				const switchSession = body.switchSession !== false;
 				// 验卡 / 写盘 / 清随卡字段 / 身份投影 / 切会话 都在 selectCard 里（与 card_switch 工具共用）
-				const r = await selectCard(host.cwd, host, cardPath);
-				host.notify(
-					"info",
-					t("{main}{persona}", { main: r.result === "switched" ? t("已切换到「{name}」的最近会话", { name: r.name }) : t("已为「{name}」新建会话", { name: r.name }), persona: r.persona ? t("（身份：{name}）", { name: r.persona }) : "" }),
-				);
+				const r = await selectCard(host.cwd, host, cardPath, { switchSession });
+				if (switchSession) {
+					host.notify(
+						"info",
+						t("{main}{persona}", { main: r.result === "switched" ? t("已切换到「{name}」的最近会话", { name: r.name }) : t("已为「{name}」新建会话", { name: r.name }), persona: r.persona ? t("（身份：{name}）", { name: r.persona }) : "" }),
+					);
+				}
 				sendJson(res, 200, {
 					result: r.result,
 					name: r.name,

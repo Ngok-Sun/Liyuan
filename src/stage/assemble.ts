@@ -261,10 +261,15 @@ export interface StageSystemOptions {
 	config: RpConfig;
 	constantLore: LorebookEntry[];
 	/**
-	 * 用户规矩两级文件（刀2，src/user-rules.ts）：全局在前、卡级在后，原文直通
+	 * 用户规矩三级文件（src/user-rules.ts）：全局 → 卡级 → 项目级，原文直通
 	 * （这是用户自己的话，不包装、不加引导语——铁律一）。
 	 */
 	userRules?: UserRules;
+	/**
+	 * 项目级记忆总索引（`cards/<卡>/对话/<chatId>/记忆/MEMORY.md`）：
+	 * 非空时原样拼在项目规矩之后；空或不存在时零开销。
+	 */
+	chatMemoryIndex?: string;
 	/**
 	 * 卡档案（刀3，src/card-agents.ts）：`cards/<卡>/AGENTS.md` 全文。
 	 * 非空 ⇒ 文件为准，下方卡 sections（兜底段/蓝灯/卡作者附加指令）整组让位——
@@ -296,6 +301,7 @@ export function buildStageSystemPrompt({
 	config,
 	constantLore,
 	userRules,
+	chatMemoryIndex,
 	cardAgents,
 	presetBefore,
 	filledMarkers,
@@ -313,10 +319,13 @@ export function buildStageSystemPrompt({
 	// 预设装配段：原文原序，零 harness 引导语。卡/世界书/人设已在预设作者指定的槽位里。
 	if (presetBefore && presetBefore.length > 0) sections.push(presetBefore.join("\n\n"));
 
-	// 用户规矩（刀2）：pi 基座（SYSTEM.md/AGENTS.md 链）在前，这里是用户自己的话，
-	// 原文直通两级文件（全局→卡级），位于遗留预设段之后、梨园装配段之前。
-	for (const text of [userRules?.global, userRules?.card]) {
+	// 用户规矩（三级：全局 → 卡级 → 项目级）与项目记忆总索引（MEMORY.md）：
+	// 原文直通，位于遗留预设段之后、梨园装配段之前。
+	for (const text of [userRules?.global, userRules?.card, userRules?.chat]) {
 		if (text && text.trim()) sections.push(text.trim());
+	}
+	if (chatMemoryIndex && chatMemoryIndex.trim()) {
+		sections.push(m(chatMemoryIndex.trim()));
 	}
 
 	if (agentsText) {

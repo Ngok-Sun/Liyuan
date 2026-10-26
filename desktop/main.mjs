@@ -533,7 +533,7 @@ function buildSplash() {
 		`<div class="splash-sub">${t("基于 pi 构建的 RP Agent")}</div>` +
 		`<div class="splash-bar"><div class="splash-shimmer"></div></div>` +
 		`<div class="splash-status"><span class="splash-dot"></span><span>${t("正在准备扮演…")}</span></div>` +
-		`<div class="splash-footer">v${app.getVersion?.() || "1.6.4"} · Liyuan Engine</div>` +
+		`<div class="splash-footer">v${app.getVersion?.() || "1.6.5"} · Liyuan Engine</div>` +
 		`</main></body></html>`;
 	return "data:text/html;charset=utf-8," + encodeURIComponent(html);
 }

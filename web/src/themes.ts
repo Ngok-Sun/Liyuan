@@ -116,6 +116,11 @@ export function applyThemeById(id: string): void {
 	} catch {
 		// ignore
 	}
+	try {
+		window.dispatchEvent(new CustomEvent("liyuan:theme-change", { detail: { id: target.id, isDark: target.isDark } }));
+	} catch {
+		// ignore
+	}
 }
 
 export interface WallpaperConfig {

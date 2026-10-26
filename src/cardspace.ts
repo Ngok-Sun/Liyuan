@@ -28,18 +28,24 @@ import { buildZipBuffer, extractZipFile } from "./ziplite.ts";
 import {
 	CARD_CONFIG_FILE,
 	CARDS_ROOT,
+	CHAT_DOCS_MEMORY_DIR,
 	CHAT_META_FILE,
 	CHAT_HISTORY_DIR,
+	CHAT_MEMORY_INDEX_FILE,
 	CHAT_PANELS_FILE,
 	CHAT_SESSIONS_DIR,
 	CHAT_STATE_FILE,
 	CHAT_STORY_DIR,
+	CHAT_SUMMARY_FILE,
 	CHAT_WORLDLINE_FILE,
 	CHATS_DIR,
 	cardDirOf,
 	cardsRoot,
 	chatDirOf,
+	chatMemoryDocsDirOf,
+	chatMemoryIndexPath,
 	chatSessionsDirOf,
+	chatSummaryPath,
 	chatsRoot,
 	dir,
 	folderSafe,
@@ -142,12 +148,12 @@ export function listCardSpaces(cwd: string): CardSpace[] {
 	return out;
 }
 
-/** 取一个没被占用的文件夹名（同名卡加 `-2`、`-3`…） */
+/** 取一个没被占用的文件夹名（同名卡加 `-2`、`-3`…；若原目录已删去卡本体仅留数据，则直接复用） */
 export function freeCardFolder(cwd: string, preferred: string): string {
 	const base = folderSafe(preferred) || "card";
 	let name = base;
 	let n = 2;
-	while (existsSync(cardDirOf(cwd, name))) {
+	while (existsSync(cardDirOf(cwd, name)) && cardFileIn(cardDirOf(cwd, name)) !== null) {
 		name = `${base}-${n}`;
 		n += 1;
 	}
@@ -413,9 +419,11 @@ export function listChats(cardDir: string): ChatInfo[] {
 export function createChat(cardDir: string, opts?: { id?: string; name?: string; now?: Date; mode?: "agent" }): ChatInfo {
 	const now = opts?.now ?? new Date();
 	const id = opts?.id ?? newChatId(now);
+	const cDir = chatDirOf(cardDir, id);
 	mkdirSync(chatSessionsDirOf(cardDir, id), { recursive: true });
+	mkdirSync(chatMemoryDocsDirOf(cDir), { recursive: true });
 	// agent 子项目：稿子目录与快照仓一开始就在（docs/PLAN-AGENT-CODING.md §三），打开目录就能看见项目的形状
-	if (opts?.mode === "agent") for (const d of [CHAT_STORY_DIR, CHAT_HISTORY_DIR]) mkdirSync(join(chatDirOf(cardDir, id), d), { recursive: true });
+	if (opts?.mode === "agent") for (const d of [CHAT_STORY_DIR, CHAT_HISTORY_DIR]) mkdirSync(join(cDir, d), { recursive: true });
 	writeChatMeta(cardDir, id, { createdAt: now.toISOString(), ...(opts?.name ? { name: opts.name } : {}), ...(opts?.mode === "agent" ? { mode: "agent" } : {}) });
 	return chatInfo(cardDir, id);
 }
@@ -570,3 +578,111 @@ export function mergeCardConfig(global: RpConfig, card: CardConfig): RpConfig {
 	}
 	return out as RpConfig;
 }
+
+// ---------- 项目级 .md 资产（前情提要 / MEMORY.md 索引 / 资产列表） ----------
+
+/** 读取项目级跨会话前情提要（`<子项目>/前情提要.md`）；不存在或为空返回 undefined */
+export function readChatSummary(chatDir: string | null | undefined): string | undefined {
+	if (!chatDir) return undefined;
+	const file = chatSummaryPath(chatDir);
+	if (!existsSync(file)) return undefined;
+	try {
+		const text = readFileSync(file, "utf8").trim();
+		return text || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** 写入项目级跨会话前情提要（`<子项目>/前情提要.md`），供同项目新开会话无缝接力 */
+export function writeChatSummary(chatDir: string | null | undefined, summary: string): void {
+	if (!chatDir) return;
+	const text = summary.trim();
+	if (!text) return;
+	try {
+		mkdirSync(chatDir, { recursive: true });
+		writeFileSync(chatSummaryPath(chatDir), `${text}\n`, "utf8");
+	} catch {
+		/* 旁路文件写失败不影响主流程 */
+	}
+}
+
+/** 读取项目级记忆总索引（`<子项目>/记忆/MEMORY.md`）；不存在或为空返回空串 */
+export function readChatMemoryIndex(chatDir: string | null | undefined): string {
+	if (!chatDir) return "";
+	const file = chatMemoryIndexPath(chatDir);
+	if (!existsSync(file)) return "";
+	try {
+		return readFileSync(file, "utf8").trim();
+	} catch {
+		return "";
+	}
+}
+
+export interface ChatMarkdownAsset {
+	/** 相对子项目根的路径（正斜杠，如 `APPEND_SYSTEM.md`、`前情提要.md`、`记忆/MEMORY.md`） */
+	relPath: string;
+	/** 显示文件名 */
+	name: string;
+	/** 资产分类 */
+	category: "rules" | "summary" | "memory";
+	size: number;
+	modified: number;
+}
+
+/**
+ * 列举子项目下的 `.md` 资产文件（面向 CLI 与前端「项目资产」面板，不暴露 JSON 状态文件与写作 `正文/`）。
+ */
+export function listChatMarkdownAssets(chatDir: string | null | undefined): ChatMarkdownAsset[] {
+	if (!chatDir || !existsSync(chatDir)) return [];
+	const out: ChatMarkdownAsset[] = [];
+	try {
+		for (const entry of readdirSync(chatDir)) {
+			if (!entry.toLowerCase().endsWith(".md")) continue;
+			const full = join(chatDir, entry);
+			try {
+				const st = statSync(full);
+				if (!st.isFile()) continue;
+				const category =
+					entry === "APPEND_SYSTEM.md" ? "rules" : entry === CHAT_SUMMARY_FILE ? "summary" : "memory";
+				out.push({ relPath: entry, name: entry, category, size: st.size, modified: st.mtimeMs });
+			} catch {
+				continue;
+			}
+		}
+	} catch {
+		/* ignore */
+	}
+	const memDir = chatMemoryDocsDirOf(chatDir);
+	if (existsSync(memDir)) {
+		try {
+			for (const entry of readdirSync(memDir)) {
+				if (!entry.toLowerCase().endsWith(".md")) continue;
+				const full = join(memDir, entry);
+				try {
+					const st = statSync(full);
+					if (!st.isFile()) continue;
+					out.push({
+						relPath: `${CHAT_DOCS_MEMORY_DIR}/${entry}`,
+						name: entry,
+						category: "memory",
+						size: st.size,
+						modified: st.mtimeMs,
+					});
+				} catch {
+					continue;
+				}
+			}
+		} catch {
+			/* ignore */
+		}
+	}
+	const rank = (a: ChatMarkdownAsset): number => {
+		if (a.relPath === "APPEND_SYSTEM.md") return 0;
+		if (a.relPath === `${CHAT_DOCS_MEMORY_DIR}/${CHAT_MEMORY_INDEX_FILE}`) return 1;
+		if (a.relPath === CHAT_SUMMARY_FILE) return 2;
+		return 3;
+	};
+	return out.sort((a, b) => rank(a) - rank(b) || a.relPath.localeCompare(b.relPath, "zh-CN"));
+}
+

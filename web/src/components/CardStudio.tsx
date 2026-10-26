@@ -10,7 +10,7 @@ import type {
 } from "../../../src/card-authoring-types.ts";
 import { apiGet, apiGetCacheClear, apiPost, type CardResponse } from "../api.ts";
 import { buildCardAuthoringPreview, CARD_PREVIEW_SANDBOX, cardPreviewUrl } from "../cardAuthoringPreview.ts";
-import { IconClose, IconEdit, IconList } from "./icons.tsx";
+import { IconBack, IconClose, IconEdit, IconList } from "./icons.tsx";
 import { PreviewEventList, type PreviewEvent } from "./PreviewRunner.tsx";
 import "./CardStudio.css";
 import { t } from "../i18n/index.ts";
@@ -101,7 +101,7 @@ interface RawCardData {
 
 type LoreEntry = NonNullable<NonNullable<RawCardData["character_book"]>["entries"]>[number];
 
-export function CardStudio({ onClose, onApplied }: { onClose: () => void; onApplied: () => void }) {
+export function CardStudio({ onClose, onBack, onApplied }: { onClose: () => void; onBack?: () => void; onApplied: () => void }) {
 	const [cardInfo, setCardInfo] = useState<CardResponse | null>(null);
 	const [status, setStatus] = useState<CardProjectStatus | null>(null);
 	const [outline, setOutline] = useState<CardOutline | null>(null);
@@ -1622,6 +1622,17 @@ export function CardStudio({ onClose, onApplied }: { onClose: () => void; onAppl
 			{/* 顶栏 */}
 			<header className="cs-header">
 					<div className="cs-header-left">
+						{onBack && (
+							<button
+								type="button"
+								className="cs-btn-micro cs-back-btn"
+								onClick={onBack}
+								title={t("返回档案")}
+							>
+								<IconBack size={13} />
+								<span>{t("返回档案")}</span>
+							</button>
+						)}
 						<button
 							type="button"
 							className="cs-nav-toggle-btn"

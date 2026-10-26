@@ -239,6 +239,7 @@ export const cards: Record<string, string> = {
 	"导出 JSON 格式": "Export JSON",
 
 	// 顶栏与大纲
+	"返回档案": "Back to profile",
 	"角色卡工坊": "Card Studio",
 	"收起创作大纲": "Hide outline",
 	"展开创作大纲": "Show outline",

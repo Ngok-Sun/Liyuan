@@ -99,6 +99,20 @@ export const TOOL_LABELS: Record<string, string> = {
 	ls: "列目录", // i18n-ignore
 	conversation_mode: "切换模式", // i18n-ignore
 	card_project: "卡片资源", // i18n-ignore
+	story_read: "查阅剧情", // i18n-ignore
+	memory_search: "检索记忆", // i18n-ignore
+	memory_read: "查阅记忆", // i18n-ignore
+	memory_list: "列记忆", // i18n-ignore
+	memory_add: "写入记忆", // i18n-ignore
+	memory_update: "改写记忆", // i18n-ignore
+	memory_delete: "删除记忆", // i18n-ignore
+	lorebook_read: "查阅设定", // i18n-ignore
+	lorebook_list: "列设定", // i18n-ignore
+	lorebook_update: "改写设定", // i18n-ignore
+	lorebook_delete: "删除设定", // i18n-ignore
+	lorebook_create: "新建世界书", // i18n-ignore
+	card_read: "查阅角色卡", // i18n-ignore
+	card_update: "改写角色卡", // i18n-ignore
 };
 
 export const toolLabel = (name: string) => {

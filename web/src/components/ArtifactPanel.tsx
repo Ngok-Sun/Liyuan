@@ -179,20 +179,52 @@ export function ArtifactPanel({
 
 // ---------- 极简 markdown 渲染（面板够用的子集，输出 React 元素、不碰 innerHTML） ----------
 
-/** 行内标记：**粗体**、*斜体*、`代码`；[文字](链接) 只呈现文字（静态锁死，不给导航面） */
-function inline(text: string) {
-	const parts = text.split(/(\*\*[^*\n]+\*\*|\*[^*\n]+\*|`[^`\n]+`|\[[^\]\n]+\]\([^)\n]+\))/g);
+/** 点击刮开的黑幕标签（||剧透/悄悄话||） */
+function SpoilerSpan({ text }: { text: string }) {
+	const [revealed, setRevealed] = useState(false);
+	return (
+		<span
+			className={`md-spoiler ${revealed ? "revealed" : ""}`}
+			role="button"
+			tabIndex={0}
+			onClick={() => setRevealed((v) => !v)}
+			onKeyDown={(e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					setRevealed((v) => !v);
+				}
+			}}
+			title={revealed ? t("点击收起遮盖") : t("点击展开遮盖")}
+		>
+			{text}
+		</span>
+	);
+}
+
+/** 行内标记：**粗体**、*斜体*、`代码`、||遮盖||；[文字](链接) 默认呈现文字，传入 onLinkClick 时可响应内部文档跳转 */
+function inline(text: string, onLinkClick?: (href: string) => void) {
+	const parts = text.split(/(\*\*[^*\n]+\*\*|\|\|[^|\n]+\|\||\*[^*\n]+\*|`[^`\n]+`|\[[^\]\n]+\]\([^)\n]+\))/g);
 	return parts.map((p, i) => {
 		if (p.startsWith("**") && p.endsWith("**")) return <strong key={i}>{p.slice(2, -2)}</strong>;
+		if (p.startsWith("||") && p.endsWith("||") && p.length > 4) return <SpoilerSpan key={i} text={p.slice(2, -2)} />;
 		if (p.startsWith("*") && p.endsWith("*")) return <em key={i}>{p.slice(1, -1)}</em>;
 		if (p.startsWith("`") && p.endsWith("`")) return <code key={i}>{p.slice(1, -1)}</code>;
-		const link = /^\[([^\]]+)\]\([^)]+\)$/.exec(p);
-		if (link) return <span key={i} className="md-link-text">{link[1]}</span>;
+		const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(p);
+		if (link) {
+			if (onLinkClick) {
+				return (
+					<button key={i} type="button" className="md-link-btn" onClick={() => onLinkClick(link[2])}>
+						{link[1]}
+					</button>
+				);
+			}
+			return <span key={i} className="md-link-text">{link[1]}</span>;
+		}
 		return <span key={i}>{p}</span>;
 	});
 }
 
-function renderMarkdown(src: string) {
+export function renderMarkdown(src: string, onLinkClick?: (href: string) => void) {
 	const lines = src.split(/\r?\n/);
 	const out: ReactNode[] = [];
 	let key = 0;
@@ -219,7 +251,7 @@ function renderMarkdown(src: string) {
 		if (h) {
 			const level = h[1].length;
 			const Tag = (["h1", "h2", "h3", "h4"] as const)[level - 1];
-			out.push(<Tag key={key++}>{inline(h[2])}</Tag>);
+			out.push(<Tag key={key++}>{inline(h[2], onLinkClick)}</Tag>);
 			i++;
 			continue;
 		}
@@ -237,7 +269,7 @@ function renderMarkdown(src: string) {
 				<blockquote key={key++}>
 					{buf.map((l, li) => (
 						<span key={li}>
-							{inline(l)}
+							{inline(l, onLinkClick)}
 							{li < buf.length - 1 && <br />}
 						</span>
 					))}
@@ -257,12 +289,12 @@ function renderMarkdown(src: string) {
 				<table key={key++}>
 					{head && (
 						<thead>
-							<tr>{head.map((c, ci) => <th key={ci}>{inline(c)}</th>)}</tr>
+							<tr>{head.map((c, ci) => <th key={ci}>{inline(c, onLinkClick)}</th>)}</tr>
 						</thead>
 					)}
 					<tbody>
 						{body.map((r, ri) => (
-							<tr key={ri}>{r.map((c, ci) => <td key={ci}>{inline(c)}</td>)}</tr>
+							<tr key={ri}>{r.map((c, ci) => <td key={ci}>{inline(c, onLinkClick)}</td>)}</tr>
 						))}
 					</tbody>
 				</table>,
@@ -278,7 +310,7 @@ function renderMarkdown(src: string) {
 				i++;
 			}
 			const L = ordered ? "ol" : "ul";
-			out.push(<L key={key++}>{items.map((it, ii) => <li key={ii}>{inline(it)}</li>)}</L>);
+			out.push(<L key={key++}>{items.map((it, ii) => <li key={ii}>{inline(it, onLinkClick)}</li>)}</L>);
 			continue;
 		}
 		// 普通段落：连续非空行合并
@@ -294,7 +326,7 @@ function renderMarkdown(src: string) {
 			<p key={key++}>
 				{buf.map((l, li) => (
 					<span key={li}>
-						{inline(l)}
+						{inline(l, onLinkClick)}
 						{li < buf.length - 1 && <br />}
 					</span>
 				))}

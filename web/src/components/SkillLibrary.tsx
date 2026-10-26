@@ -1,26 +1,50 @@
 /**
- * skill 库编辑器（8/12 定案：预设不再产 skill，预设面板 skill 页签让位给真 skill 库）。
- *
- * 读写 /api/stage-skills —— 与引擎 scanSkillFiles 是同一份 `skills/<目录>/SKILL.md`：
- * 保存后下一拍装载即生效（引擎每拍现读）；常驻=全文每拍随 system，拉取=进 L1 索引由模型
- * 按需 skill_read。没有第二套「面板专用」存储。
+ * 技能库面板（读写 /api/stage-skills —— 与引擎 scanSkillFiles 共用 `skills/<目录>/SKILL.md`）：
+ * 保存后下一拍装载即生效；支持新建、导入/导出 .md、展开预览正文与对模型显隐开关。
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { apiDelete, apiGet, apiPost } from "../api.ts";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiDelete, apiGet, apiPost, downloadText } from "../api.ts";
+import { IconDownload, IconPencil, IconPlus, IconTrash, IconUploads } from "./icons.tsx";
 import { ConfirmButton, Toggle } from "./kit.tsx";
 import { t } from "../i18n/index.ts";
 
 type Scope = "global" | "card";
-type StageSkill = { dir: string; name: string; description: string; chars: number; body: string; disabled: boolean; scope: Scope; shadowed?: boolean };
+type StageSkill = {
+	dir: string;
+	name: string;
+	description: string;
+	chars: number;
+	body: string;
+	disabled: boolean;
+	scope: Scope;
+	shadowed?: boolean;
+};
 type EditState = { dir: string | null; name: string; description: string; body: string; scope: Scope };
+
+/** 从导入的 .md 解析可选 frontmatter 与正文 */
+function parseImportedSkillMd(raw: string, fallbackName: string): { name: string; description: string; body: string } {
+	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw);
+	if (!m) {
+		return { name: fallbackName, description: "", body: raw.trim() };
+	}
+	const head = m[1];
+	const pick = (k: string) => new RegExp(`^${k}:\\s*(.*)$`, "m").exec(head)?.[1]?.trim() ?? "";
+	return {
+		name: pick("name") || fallbackName,
+		description: pick("description"),
+		body: m[2].trim(),
+	};
+}
 
 export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const [skills, setSkills] = useState<StageSkill[] | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [edit, setEdit] = useState<EditState | null>(null);
+	const [expandedKey, setExpandedKey] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [defaultScope, setDefaultScope] = useState<Scope>("global");
+	const fileRef = useRef<HTMLInputElement>(null);
 
 	const reload = useCallback(async () => {
 		try {
@@ -32,6 +56,7 @@ export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "e
 			setError(e instanceof Error ? e.message : String(e));
 		}
 	}, []);
+
 	useEffect(() => {
 		void reload();
 	}, [reload]);
@@ -57,7 +82,6 @@ export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "e
 		}
 	};
 
-	/** 对模型隐身开关（与「办事笔记」那栏同一个键 disable-model-invocation）：整条重存，正文原样带回 */
 	const setExposed = async (s: StageSkill, exposed: boolean) => {
 		setBusy(true);
 		try {
@@ -91,16 +115,56 @@ export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "e
 		}
 	};
 
+	const handleImportMd = async (file: File) => {
+		try {
+			const raw = await file.text();
+			const baseName = file.name.replace(/\.md$/i, "").trim() || "skill";
+			const parsed = parseImportedSkillMd(raw, baseName);
+			setEdit({
+				dir: null,
+				name: parsed.name,
+				description: parsed.description,
+				body: parsed.body,
+				scope: defaultScope,
+			});
+		} catch (e) {
+			toast("error", e instanceof Error ? e.message : String(e));
+		} finally {
+			if (fileRef.current) fileRef.current.value = "";
+		}
+	};
+
+	const exportSkillMd = (s: StageSkill) => {
+		const fm = [
+			"---",
+			`name: ${s.name}`,
+			...(s.description ? [`description: ${s.description}`] : []),
+			...(s.disabled ? ["disable-model-invocation: true"] : []),
+			"---",
+			"",
+			s.body,
+		].join("\n");
+		downloadText(`${s.name || s.dir}.md`, fm);
+	};
+
 	const renderForm = () => {
 		if (!edit) return null;
 		return (
 			<div className="skill-edit-form">
 				<label className="field-label">{t("适用范围")}</label>
-				<select aria-label={t("技能适用范围")} value={edit.scope} disabled={busy || edit.dir !== null} onChange={(e) => setEdit({ ...edit, scope: e.target.value as Scope })}>
+				<select
+					className="panel-search"
+					aria-label={t("技能适用范围")}
+					value={edit.scope}
+					disabled={busy || edit.dir !== null}
+					onChange={(e) => setEdit({ ...edit, scope: e.target.value as Scope })}
+				>
 					{defaultScope === "card" && <option value="card">{t("当前角色卡")}</option>}
 					<option value="global">{t("所有角色卡")}</option>
 				</select>
-				<label className="field-label">{t("名称（模型用它点名 skill_read）")}</label>
+				<label className="field-label" style={{ marginTop: 8 }}>
+					{t("名称（模型用它点名 skill_read）")}
+				</label>
 				<input
 					className="panel-search"
 					value={edit.name}
@@ -123,7 +187,7 @@ export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "e
 				</label>
 				<textarea
 					className="panel-search ta preset-block-ta"
-					rows={14}
+					rows={12}
 					spellCheck={false}
 					value={edit.body}
 					disabled={busy}
@@ -131,7 +195,7 @@ export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "e
 					onChange={(e) => setEdit({ ...edit, body: e.target.value })}
 				/>
 				<div className="panel-row list-toolbar skill-edit-acts">
-					<button className="drawer-btn save-btn" disabled={busy} onClick={() => void save()}>
+					<button className="drawer-btn save-btn" disabled={busy || !edit.name.trim() || !edit.body.trim()} onClick={() => void save()}>
 						{t("保存")}
 					</button>
 					<button className="drawer-btn" disabled={busy} onClick={() => setEdit(null)}>
@@ -144,53 +208,106 @@ export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "e
 
 	return (
 		<section className="sp-section">
-			<div className="new-skill">
+			<div className="panel-row list-toolbar" style={{ marginBottom: 8 }}>
 				<button
+					type="button"
+					className="drawer-btn save-btn"
+					disabled={busy || !!edit}
+					onClick={() => setEdit({ dir: null, name: "", description: "", body: "", scope: defaultScope })}
+				>
+					<IconPlus size={13} /> {t("＋ 新建技能")}
+				</button>
+				<button
+					type="button"
 					className="drawer-btn"
 					disabled={busy || !!edit}
-						onClick={() => setEdit({ dir: null, name: "", description: "", body: "", scope: defaultScope })}
+					onClick={() => fileRef.current?.click()}
 				>
-					{t("＋ 新建 skill")}
+					<IconUploads size={13} /> {t("导入 .md")}
 				</button>
+				<input
+					ref={fileRef}
+					type="file"
+					accept=".md,text/markdown"
+					hidden
+					onChange={(e) => {
+						const f = e.target.files?.[0];
+						if (f) void handleImportMd(f);
+					}}
+				/>
 			</div>
+
 			{error && <div className="panel-error">{error}</div>}
 			{skills && skills.length === 0 && !edit && (
 				<div className="sp-empty">{t("还没有 skill。点「新建」写第一个（写作方法/场面写法/文风示范都可以）。")}</div>
 			)}
-			{/* 新建表单在顶部；编辑既有项时表单内联到那一行的位置（不用翻回顶部） */}
+
 			{edit && edit.dir === null && renderForm()}
-			{skills?.map((s) =>
-					edit && edit.dir === s.dir && edit.scope === s.scope ? (
-						<div key={`${s.scope}:${s.dir}`}>{renderForm()}</div>
-					) : (
-						<div key={`${s.scope}:${s.dir}`} className="skill-lib-row">
-						<div className="skill-lib-main">
-							<span className="lore-title">
-								{s.name}
-							</span>
-							<span className="lore-meta">
-									{s.scope === "card" ? t("当前卡") : t("全局")}{s.shadowed ? t(" · 当前卡已覆盖") : ""} · {s.description} · {t("{n} 字", { n: s.chars.toLocaleString() })}
-							</span>
+
+			<div className="skill-card-list">
+				{skills?.map((s) => {
+					const rowKey = `${s.scope}:${s.dir}`;
+					const isEditing = Boolean(edit && edit.dir === s.dir && edit.scope === s.scope);
+					const isExpanded = expandedKey === rowKey;
+					if (isEditing) {
+						return <div key={rowKey}>{renderForm()}</div>;
+					}
+					return (
+						<div key={rowKey} className={`skill-card-item ${!s.disabled ? "on" : "muted"}`}>
+							<div className="skill-card-head">
+								<button
+									type="button"
+									className="skill-card-main"
+									onClick={() => setExpandedKey(isExpanded ? null : rowKey)}
+								>
+									<div className="skill-card-title-row">
+										<span className="skill-card-name">{s.name}</span>
+										<span className={`skill-scope-badge ${s.scope === "card" ? "card" : "global"}`}>
+											{s.scope === "card" ? t("当前卡") : t("全局")}
+										</span>
+										{s.shadowed && <span className="skill-scope-badge shadowed">{t("当前卡已覆盖")}</span>}
+										<span className="skill-card-chars">{t("{n} 字", { n: s.chars.toLocaleString() })}</span>
+									</div>
+									{s.description && <div className="skill-card-desc">{s.description}</div>}
+								</button>
+								<label
+									className="expose-toggle"
+									title={t("开＝名字与说明上 skill_read 清单，剧情模型按需读；关＝对模型隐身（本页仍在，随时开回来）")}
+								>
+									<Toggle checked={!s.disabled} disabled={busy || !!edit} onChange={(v) => void setExposed(s, v)} />
+								</label>
+							</div>
+
+							{isExpanded && (
+								<div className="skill-card-body">
+									<pre className="skill-card-preview">{s.body}</pre>
+									<div className="skill-card-acts">
+										<button
+											type="button"
+											className="act"
+											disabled={busy || !!edit}
+											onClick={() => setEdit({ dir: s.dir, name: s.name, description: s.description, body: s.body, scope: s.scope })}
+										>
+											<IconPencil size={12} /> {t("编辑")}
+										</button>
+										<button type="button" className="act" onClick={() => exportSkillMd(s)}>
+											<IconDownload size={12} /> {t("导出 .md")}
+										</button>
+										<ConfirmButton
+											className="act"
+											disabled={busy || !!edit}
+											confirmText={t("确认删除")}
+											onConfirm={() => void remove(s.dir, s.scope)}
+										>
+											<IconTrash size={12} /> {t("删除")}
+										</ConfirmButton>
+									</div>
+								</div>
+							)}
 						</div>
-						<label className="expose-toggle" title={t("开＝名字与说明上 skill_read 清单，剧情模型按需读；关＝对模型隐身（本页仍在，随时开回来）")}>
-							<span className="expose-label">{s.disabled ? t("已隐藏") : t("已暴露")}</span>
-							<Toggle checked={!s.disabled} disabled={busy || !!edit} onChange={(v) => void setExposed(s, v)} />
-						</label>
-						<div className="preset-block-acts">
-							<button
-								className="act"
-								disabled={busy || !!edit}
-									onClick={() => setEdit({ dir: s.dir, name: s.name, description: s.description, body: s.body, scope: s.scope })}
-							>
-								{t("编辑")}
-							</button>
-								<ConfirmButton className="act" disabled={busy || !!edit} confirmText={t("确认删除")} onConfirm={() => void remove(s.dir, s.scope)}>
-								{t("删除")}
-							</ConfirmButton>
-						</div>
-					</div>
-				),
-			)}
+					);
+				})}
+			</div>
 		</section>
 	);
 }

@@ -16,6 +16,8 @@ import {
 } from "../src/postprocess.ts";
 import { hasDepthLimits } from "../src/cardfront.ts";
 import { t } from "../src/i18n/index.ts";
+import type { BotSessionSnapshot, BotSessionAction } from "../src/stage/bot-session-types.ts";
+export type { BotSessionSnapshot, BotSessionAction };
 import type { AuthorScript } from "../src/authorScripts.ts";
 import type { CardProjectPreview } from "../src/card-authoring-types.ts";
 import { isBackstageText } from "../src/stance.ts";
@@ -247,6 +249,21 @@ export interface WireActivity {
 	change?: ActivityFileChange;
 }
 
+/** 幕后副编剧单次工具调用轨迹（与 src/stage/bot.ts 的 BotToolCallRecord 同构） */
+export interface WireBotToolCall {
+	name: string;
+	detail?: string;
+	isError?: boolean;
+}
+
+/** 幕后副编剧线程条目（与 src/stage/bot.ts 的 BotThreadEntry 同构） */
+export interface WireBotMsg {
+	role: "user" | "assistant";
+	text: string;
+	ts?: number;
+	tools?: WireBotToolCall[];
+}
+
 /**
  * 在线更新状态（主页 chip / 弹窗 / 进度气泡共用一份状态）。
  * phase 流转：none → available →(下载)→ downloading → ready；失败回 available 带 error。
@@ -294,6 +311,10 @@ export type ServerFrame =
 			messages: WireMsg[];
 			workspace?: DraftView;
 			streaming?: boolean;
+			/** 幕后副编剧（PLAN-COMPANION-BOT）：当前子项目的副编剧历史与流式态 */
+			botMessages?: WireBotMsg[];
+			botStreaming?: boolean;
+			botSession?: BotSessionSnapshot;
 			state: WorldState | null;
 			stats: WireStats | null;
 			/** agent 自建面板（柱 2）：当前活跃面板全量（页签序） */
@@ -347,6 +368,13 @@ export type ServerFrame =
 	| { type: "screenshot"; id: string; file?: string }
 	/** 在线更新状态变化（发现新版/下载进度/就绪）：全量状态推送 */
 	| { type: "update"; update: UpdateWire }
+	/** 幕后副编剧（PLAN-COMPANION-BOT）：历史同步 / 流式状态 / 流式增量 / 工具活动 / 完整消息 */
+	| { type: "bot_history"; messages: WireBotMsg[] }
+	| { type: "bot_session"; snapshot: BotSessionSnapshot }
+	| { type: "bot_state"; state: "start" | "end" }
+	| { type: "bot_delta"; kind: "text" | "thinking"; delta: string }
+	| { type: "bot_activity"; activity: WireActivity }
+	| { type: "bot_message"; message: WireBotMsg }
 	| { type: "error"; text: string };
 
 /** Client → Server 帧 */
@@ -355,6 +383,9 @@ export type ClientFrame =
 	| { type: "conversation_mode"; mode: "roleplay" | "authoring" }
 	| { type: "draft_restore"; id: string; version: number; expectedVersion: number }
 	| { type: "prompt"; text: string }
+	| { type: "bot_prompt"; text: string }
+	| { type: "bot_clear" }
+	| { type: "bot_manage"; request: BotSessionAction }
 	| { type: "abort" }
 	/**
 	 * 重新生成最后一轮。

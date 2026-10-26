@@ -164,11 +164,11 @@ export function StatusStrip({
 	};
 
 	const empty = !state || isEmptyState(state);
-	const summary = empty
-		? t("世界状态（随对话自动记录）")
-		: [state.time, state.location].filter(Boolean).join(" · ") || t("世界状态");
-
 	const isOpen = onOpenPanel ? active : open;
+	if (empty && !isOpen) return null;
+	const summary = empty
+		? t("世界状态")
+		: [state.time, state.location].filter(Boolean).join(" · ") || t("世界状态");
 	const handleClick = () => {
 		if (onOpenPanel) {
 			onOpenPanel();

@@ -161,7 +161,7 @@ test("资料快照：留最近 KEEP 条，更早的连无人引用的对象一�
 		const lore = join(cwd, "assets", "lorebooks");
 		// 每条都换内容 → 每条都进一个新对象
 		for (let i = 0; i < KEEP_CHECKPOINTS + 5; i++) {
-			write(lore, "甲.json", `第 ${i} 版`);
+			write(lore, "甲.json", `第 ${i} 版 ${"x".repeat(i)}`);
 			v.snapshot("api");
 		}
 		assert.equal(v.list().length, KEEP_CHECKPOINTS);
@@ -175,7 +175,7 @@ test("资料快照：留最近 KEEP 条，更早的连无人引用的对象一�
 		const latest = v.latest()!;
 		for (const [rel, sha] of Object.entries(latest.files)) assert.ok(existsSync(join(cwd, VAULT_DIR, "对象", sha)), `${rel} 的对象在仓里`);
 		v.restore(latest.id);
-		assert.equal(readFileSync(join(lore, "甲.json"), "utf8"), `第 ${KEEP_CHECKPOINTS + 4} 版`);
+		assert.equal(readFileSync(join(lore, "甲.json"), "utf8"), `第 ${KEEP_CHECKPOINTS + 4} 版 ${"x".repeat(KEEP_CHECKPOINTS + 4)}`);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 

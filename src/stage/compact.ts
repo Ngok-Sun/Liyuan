@@ -75,6 +75,8 @@ export interface PlanCompactionOptions {
 	minChars?: number;
 	/** 稿子目录（agent 模式，docs/PLAN-AGENT-CODING.md §七）：单位从「拍」换成「文件」，正文从文件读 */
 	storyDir?: string;
+	/** 项目级跨会话前情兜底（当前会话尚无 rp-summary 时合并 `<子项目>/前情提要.md`） */
+	previousSummaryFallback?: string;
 }
 
 /**
@@ -141,12 +143,13 @@ export function planCompaction(branch: BranchEntryLike[], opts: PlanCompactionOp
 	const conversationText = serializeForSummary(covered, opts.userName, opts.charName);
 	if (conversationText.length < minChars) return null;
 
+	const prev = active?.summary || opts.previousSummaryFallback?.trim() || undefined;
 	return {
 		coversThroughId,
 		covered,
 		turns: beatStarts.length - keep,
 		conversationText,
-		...(active ? { previousSummary: active.summary } : {}),
+		...(prev ? { previousSummary: prev } : {}),
 	};
 }
 
@@ -175,13 +178,14 @@ function planFileCompaction(branch: BranchEntryLike[], opts: PlanCompactionOptio
 
 	const last = branch[branch.length - 1];
 	if (!last?.id) return null;
+	const prev = active?.summary || opts.previousSummaryFallback?.trim() || undefined;
 	return {
 		coversThroughId: last.id,
 		covered: [],
 		coveredFiles: [...coveredNames, ...candidates.map((f) => f.name)],
 		turns: candidates.length,
 		conversationText,
-		...(active ? { previousSummary: active.summary } : {}),
+		...(prev ? { previousSummary: prev } : {}),
 	};
 }
 
@@ -220,6 +224,8 @@ export interface CompactRunInput {
 	minChars?: number;
 	/** 稿子目录（agent 模式；给了就按文件计划） */
 	storyDir?: string;
+	/** 项目级跨会话前情兜底（当前会话尚无 rp-summary 时合并 `<子项目>/前情提要.md`） */
+	previousSummaryFallback?: string;
 }
 
 export type CompactOutcome =
@@ -240,6 +246,7 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 		keepRecentBeats: input.keepRecentBeats,
 		minChars: input.minChars,
 		...(input.storyDir !== undefined ? { storyDir: input.storyDir } : {}),
+		...(input.previousSummaryFallback ? { previousSummaryFallback: input.previousSummaryFallback } : {}),
 	});
 	if (!plan) return { kind: "skipped", reason: "not-due" };
 

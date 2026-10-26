@@ -18,9 +18,11 @@ import type { StageTool } from "./tools.ts";
 /** 用户槽位空缺（删了或清空）时退回随包默认值——与 SYSTEM.md 缺席退随包骨架同一规则 */
 const shippedAgentRules = (): string => readFileSync(new URL("../../assets/AGENT_APPEND_SYSTEM.md", import.meta.url), "utf8");
 
-export function agentSystemPrompt(o: { cwd: string; cardPath: string; storyDir: string; userRules?: UserRules; cardAgents?: string; macro: MacroContext }): string {
+export function agentSystemPrompt(o: { cwd: string; cardPath: string; storyDir: string; userRules?: UserRules; chatMemoryIndex?: string; cardAgents?: string; macro: MacroContext }): string {
 	const sections = [(o.userRules?.agent?.trim() || shippedAgentRules()).trim()];
 	if (o.userRules?.card?.trim()) sections.push(o.userRules.card.trim());
+	if (o.userRules?.chat?.trim()) sections.push(o.userRules.chat.trim());
+	if (o.chatMemoryIndex?.trim()) sections.push(applyMacros(o.chatMemoryIndex.trim(), o.macro));
 	if (o.cardAgents?.trim()) sections.push(applyMacros(o.cardAgents.trim(), o.macro));
 	sections.push(`工作目录：${o.cwd}\n当前角色卡：${o.cardPath}\n稿子目录：${o.storyDir}`);
 	return sections.join("\n\n");

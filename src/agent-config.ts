@@ -14,12 +14,15 @@ export const ACTIVE_META_FILE = "liyuan.agent.meta.json";
 
 /**
  * 单模型条目：id 必填，其余字段原样保留。
- *
- * **一个模型可以有多条条目**——同一个 id 配不同的思考档（如「flash high」与「flash off」），
- * 是两条并列的条目。所以条目的身份不是 id，而是 `label`（缺省回落 id），见 modelEntryKey。
- * id 仍然是发给上游的那个模型名，label 只活在梨园这一侧。
+ * `thinkingLevels` 记录用户在编辑器中勾选的该模型支持的思考档位列表（如 `["off", "low", "high"]`），
+ * `thinkingLevel` 记录该模型当前默认/选中的档位。
  */
-export type AgentModelEntry = { id: string; label?: string } & Record<string, unknown>;
+export type AgentModelEntry = {
+	id: string;
+	label?: string;
+	thinkingLevel?: string;
+	thinkingLevels?: string[];
+} & Record<string, unknown>;
 
 /**
  * 条目身份：用户起的名，没起就用 id。provider 内唯一。
@@ -94,6 +97,17 @@ export function normalizeModelEntry(m: unknown): AgentModelEntry | null {
 	const out: AgentModelEntry = { ...obj, id };
 	if (label) out.label = label;
 	else delete out.label;
+	if (Array.isArray(obj.thinkingLevels)) {
+		const levels = [
+			...new Set(
+				obj.thinkingLevels
+					.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+					.map((x) => x.trim()),
+			),
+		];
+		if (levels.length > 0) out.thinkingLevels = levels;
+		else delete out.thinkingLevels;
+	}
 	return out;
 }
 
@@ -203,7 +217,11 @@ export function modelsForRuntime(models: AgentModelEntry[]): AgentModelEntry[] {
 	for (const m of models) {
 		if (seen.has(m.id)) continue;
 		seen.add(m.id);
-		out.push(m);
+		const copy: AgentModelEntry = { ...m };
+		if (!("thinkingLevel" in copy) && Array.isArray(copy.thinkingLevels) && copy.thinkingLevels.length > 0) {
+			copy.thinkingLevel = copy.thinkingLevels.find((lv) => lv !== "off") ?? copy.thinkingLevels[0];
+		}
+		out.push(copy);
 	}
 	return out;
 }
@@ -437,6 +455,40 @@ export function deleteProfile(cwd: string, id: string): void {
 	if (loadActiveProfileId(cwd) === id) saveActiveProfileId(cwd, null);
 }
 
+/**
+ * 彻底从 profile 仓库中清除指定的渠道，防止后续聚合时复活已删除的渠道
+ */
+export function deleteChannelFromProfiles(cwd: string, channelName: string): void {
+	const safeName = sanitizeProfileId(channelName);
+	const list = listProfiles(cwd);
+	for (const item of list) {
+		const rec = loadProfile(cwd, item.id);
+		if (!rec) continue;
+		let touched = false;
+		if (rec.config.providers && rec.config.providers[channelName]) {
+			delete rec.config.providers[channelName];
+			touched = true;
+		}
+		const remaining = Object.keys(rec.config.providers ?? {});
+		if (remaining.length === 0 || item.id === channelName || item.id === safeName) {
+			try {
+				deleteProfile(cwd, item.id);
+			} catch {
+				/* ignore */
+			}
+		} else if (touched) {
+			saveProfile(cwd, item.id, rec.name, rec.config);
+		}
+	}
+	for (const candidate of [channelName, safeName]) {
+		try {
+			deleteProfile(cwd, candidate);
+		} catch {
+			/* ignore */
+		}
+	}
+}
+
 export function listProfiles(cwd: string): AgentProfileListItem[] {
 	const dir = profilesDir(cwd);
 	const activeId = loadActiveProfileId(cwd);
@@ -490,6 +542,88 @@ export function enableProfile(cwd: string, agentDir: string, id: string): Liyuan
 	syncAgentConfigToRuntime(cwd, agentDir, config);
 	saveActiveProfileId(cwd, id);
 	return config;
+}
+
+/**
+ * 合并一个渠道下因旧版切档而拆成多条 `#2` 的同 id 模型条目，将其档位归并进第一条的 `thinkingLevels`。
+ */
+export function consolidateProviderModels(models: AgentModelEntry[]): { models: AgentModelEntry[]; changed: boolean } {
+	const out: AgentModelEntry[] = [];
+	let changed = false;
+	for (const m of models) {
+		const isAutoDup = typeof m.label === "string" && new RegExp(`^${m.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+#\\d+$`).test(m.label.trim());
+		const primary = out.find((x) => x.id === m.id && !x.label);
+		if (isAutoDup && primary) {
+			const set = new Set<string>(primary.thinkingLevels ?? []);
+			const pLv = typeof primary.thinkingLevel === "string" ? primary.thinkingLevel.trim() : "";
+			const mLv = typeof m.thinkingLevel === "string" ? m.thinkingLevel.trim() : "";
+			if (pLv) set.add(pLv);
+			if (mLv) set.add(mLv);
+			if (set.size > 0 && !set.has("off")) set.add("off");
+			primary.thinkingLevels = [...set];
+			if (!primary.contextWindow && m.contextWindow) primary.contextWindow = m.contextWindow;
+			if (!primary.maxTokens && m.maxTokens) primary.maxTokens = m.maxTokens;
+			changed = true;
+			continue;
+		}
+		const copy: AgentModelEntry = { ...m };
+		const lv = typeof copy.thinkingLevel === "string" ? copy.thinkingLevel.trim() : "";
+		if (!Array.isArray(copy.thinkingLevels) || copy.thinkingLevels.length === 0) {
+			if (lv && lv !== "off") {
+				copy.thinkingLevels = ["off", lv];
+				changed = true;
+			} else if (lv === "off") {
+				copy.thinkingLevels = ["off"];
+				changed = true;
+			}
+		}
+		out.push(copy);
+	}
+	return { models: out, changed };
+}
+
+/**
+ * 聚合迁移：把 `liyuan-profiles/*.json` 中所有渠道合并进 `liyuan.agent.json.providers`，
+ * 使所有已配置渠道同时在线供 pi 聚合切换（不再每次只启用单渠道），并归并同 id 的 `#2` 档位条目。
+ */
+export function mergeProfilesIntoActiveConfig(cwd: string): { merged: boolean; providers: string[] } {
+	const list = listProfiles(cwd);
+	const loaded = loadAgentConfig(cwd);
+	const cfg = loaded.config;
+	let changed = false;
+	const added: string[] = [];
+	for (const item of list) {
+		const rec = loadProfile(cwd, item.id);
+		if (!rec) continue;
+		for (const [pname, pval] of Object.entries(rec.config.providers ?? {})) {
+			if (!cfg.providers[pname]) {
+				cfg.providers[pname] = pval;
+				changed = true;
+				added.push(pname);
+			}
+		}
+		if (!cfg.defaultProvider && rec.config.defaultProvider) {
+			cfg.defaultProvider = rec.config.defaultProvider;
+			cfg.defaultModel = rec.config.defaultModel;
+			cfg.defaultThinkingLevel = rec.config.defaultThinkingLevel;
+			changed = true;
+		}
+		if (!cfg.shellPath && rec.config.shellPath) {
+			cfg.shellPath = rec.config.shellPath;
+			changed = true;
+		}
+	}
+	for (const [pname, prov] of Object.entries(cfg.providers)) {
+		const res = consolidateProviderModels(normalizeModels(prov.models));
+		if (res.changed) {
+			cfg.providers[pname] = { ...prov, models: res.models };
+			changed = true;
+		}
+	}
+	if (changed) {
+		saveAgentConfig(cwd, cfg);
+	}
+	return { merged: changed, providers: added };
 }
 
 /**

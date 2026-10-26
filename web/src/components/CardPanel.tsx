@@ -1,5 +1,5 @@
 /**
- * 角色卡面板（右栏）：卡库与详情一体。
+ * 角色卡面板（两层结构）：第一层卡库列表 ⇄ 第二层当前卡详情（含角色卡工坊入口与右扩世界书选择）。
  * 点卡即切换并进详情；若卡含内嵌世界书，弹窗询问是否另存为独立世界书并挂载（ST 式配套导入）。
  */
 
@@ -7,16 +7,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
 	apiDelete,
 	apiGet,
+	apiGetCacheClear,
 	apiPost,
 	apiPut,
 	importCard,
+	normalizeActiveLorebooks,
 	type CardLibItem,
 	type CardResponse,
 	type CardsResponse,
+	type LorebooksResponse,
+	type RpConfigView,
 } from "../api.ts";
-import { IconBack, IconClose, IconGrid, IconList, IconStar, IconUploads } from "./icons.tsx";
+import { IconBack, IconClose, IconEdit, IconGrid, IconList, IconLorebook, IconStar, IconUploads } from "./icons.tsx";
 import { bumpWatchPanels, ConfirmButton, Field, PanelStatus, SearchInput, useAction, usePanelData } from "./kit.tsx";
-import { CardAuthoring } from "./CardAuthoring.tsx";
 import { t } from "../i18n/index.ts";
 
 type CardSort = "recent" | "name" | "fav";
@@ -290,29 +293,46 @@ type CardFrontInfo = {
 
 function CardDetail({
 	toast,
+	cardPath,
 	onBack,
 	libItem,
 	onDelete,
 	onFrontChange,
+	onOpenStudio,
+	lorePickerOpen,
+	onToggleLorePicker,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
+	cardPath: string | null;
 	onBack: () => void;
 	libItem: CardLibItem | undefined;
 	onDelete: () => void;
 	onFrontChange?: () => void;
+	onOpenStudio?: () => void;
+	lorePickerOpen?: boolean;
+	onToggleLorePicker?: () => void;
 }) {
-	const { data, error, loading, reload } = usePanelData(() => apiGet<CardResponse>("/api/card"), { cacheKey: "/api/card" });
+	const cardUrl = cardPath ? `/api/card?path=${encodeURIComponent(cardPath)}` : "/api/card";
+	const { data, error, loading, reload } = usePanelData(() => apiGet<CardResponse>(cardUrl), { cacheKey: cardUrl });
+	const config = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
+	const lorebooks = usePanelData(() => apiGet<LorebooksResponse>("/api/lorebooks"), {
+		cacheKey: "/api/lorebooks",
+		watchAgent: true,
+	});
+	const activeLoreCount = useMemo(() => normalizeActiveLorebooks(lorebooks.data?.active ?? null).length, [lorebooks.data?.active]);
+	const lockedLoreForCard = Boolean(lorebooks.data?.lockedForCard);
 	const { busy, run } = useAction(toast);
-	// 简介等字段：JSON 与 PNG（tEXt 回写）均可改
 	const fieldEditable = true;
 	const [front, setFront] = useState<CardFrontInfo | null>(null);
-	/**
-	 * 卡皮肤详情随当前卡变，但 URL 里没有卡 —— 原先靠 bypassCache 保证不吃上一张卡的 hasSkin，
-	 * 代价是每次打开面板都重传一遍（真实卡实测 140KB）。改成把卡路径挂成 query：
-	 * 服务端路由只看去掉 query 的路径（rest.ts `url.split("?")[0]`），这个参数它不读，
-	 * 纯粹给前端缓存分桶 ⇒ 不同卡各占一格，**结构上**不可能串卡，重复打开则命中缓存。
-	 */
 	const frontPath = data?.path ? `/api/cardfront?card=${encodeURIComponent(data.path)}` : null;
+
+	const [editingDisplay, setEditingDisplay] = useState(false);
+	const [displayDraft, setDisplayDraft] = useState("");
+	useEffect(() => {
+		if (config.data) {
+			setDisplayDraft(config.data.config.displayName ?? "");
+		}
+	}, [config.data]);
 
 	useEffect(() => {
 		if (!frontPath) {
@@ -331,7 +351,6 @@ function CardDetail({
 		return () => {
 			cancelled = true;
 		};
-		// 改名也重跑：写操作已清掉 /api/cardfront 前缀的缓存，这里会拉到新的
 	}, [frontPath, data?.name]);
 
 	const toggleFront = (enabled: boolean) =>
@@ -344,13 +363,21 @@ function CardDetail({
 	const saveField = (patch: Record<string, string>) =>
 		run(async () => {
 			await apiPut("/api/card", patch);
+			apiGetCacheClear("/api/card");
 			reload();
 		}, t("已保存并重载会话"));
 
-	/** 导出当前卡（默认并入活跃世界书：挂载书+补充设定+原内嵌） */
+	const saveDisplayName = () =>
+		run(async () => {
+			await apiPut("/api/config", { displayName: displayDraft.trim() });
+			setEditingDisplay(false);
+			apiGetCacheClear("/api/card");
+			config.reload();
+			reload();
+		}, t("已保存并重载会话"));
+
 	const doExport = (format: "json" | "png") => {
 		const url = `/api/card/export?format=${format}&lore=active`;
-		// 用隐藏 a 触发下载（带 cookie/同源）
 		const a = document.createElement("a");
 		a.href = url;
 		a.download = "";
@@ -363,63 +390,136 @@ function CardDetail({
 
 	const pickGreeting = (index: number) =>
 		run(async () => {
-			// apply: 未开聊时即时替换对话开场白；已开聊则只记配置
 			await apiPost("/api/greeting", { index, apply: true });
+			apiGetCacheClear("/api/card");
 			reload();
 		}, t("开场白已更新"));
 
 	const saveGreeting = (index: number, text: string) =>
 		run(async () => {
 			await apiPut("/api/card/greetings", { index, text });
+			apiGetCacheClear("/api/card");
 			reload();
 		}, t("开场白已保存"));
 
 	const addGreeting = () =>
 		run(async () => {
 			await apiPost("/api/card/greetings", { text: "" });
+			apiGetCacheClear("/api/card");
 			reload();
 		}, t("已新建开场白"));
 
 	const deleteGreeting = (index: number) =>
 		run(async () => {
 			await apiDelete(`/api/card/greetings?index=${index}`);
+			apiGetCacheClear("/api/card");
 			reload();
 		}, t("已删除开场白"));
 
 	const moveGreeting = (index: number, delta: -1 | 1) =>
 		run(async () => {
 			await apiPost("/api/card/greetings/move", { index, delta });
+			apiGetCacheClear("/api/card");
 			reload();
 		});
 
 	return (
 		<div className="card-detail-scroll">
-			<button type="button" className="act back-btn" onClick={onBack}>
-				<IconBack size={14} /> {t("返回卡库")}
-			</button>
+			<div className="card-detail-topbar">
+				<button type="button" className="act back-btn" onClick={onBack}>
+					<IconBack size={14} /> {t("返回卡库")}
+				</button>
+				{onOpenStudio && (
+					<button
+						type="button"
+						className="rc-studio-btn"
+						onClick={onOpenStudio}
+						title={t("打开角色卡工坊")}
+					>
+						<IconEdit size={13} />
+						<span>{t("角色卡工坊")}</span>
+					</button>
+				)}
+			</div>
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
 			{data && (
 				<>
 					<section className="sp-section">
 						<div className="card-hero">
-							{(libItem?.isPng || libItem?.hasCover) && (
+							{(libItem?.isPng || libItem?.hasCover) ? (
 								<img className="card-hero-img" src={cardImgUrl(libItem.path)} alt={data.name} />
+							) : (
+								<div className="rc-hero-cover">
+									<div className="rc-hero-seal">{(data.name || "？").slice(0, 1)}</div>
+								</div>
 							)}
 							<div className="card-hero-info">
 								<div className="model-current">{data.name}</div>
-								{data.displayName && <div className="field-hint">{t("显示名：{name}", { name: data.displayName })}</div>}
-								<div className="field-hint">{data.path}</div>
-								{data.tags.length > 0 && (
-									<div className="tag-row">
-										{data.tags.map((t) => (
-											<span key={t} className="chip">
-												{t}
-											</span>
-										))}
+								{!editingDisplay ? (
+									<div className="rc-display-row">
+										<span className="rc-display-text">
+											{data.displayName
+												? t("显示名：{name}", { name: data.displayName })
+												: `${t("显示名（可选）")}：${data.name}`}
+										</span>
+										<button
+											type="button"
+											className="rc-link-btn"
+											onClick={() => {
+												setDisplayDraft(config.data?.config.displayName ?? data.displayName ?? "");
+												setEditingDisplay(true);
+											}}
+											title={t("仅界面显示；适用于卡名是剧本标题而非角色名的场景卡")}
+										>
+											{t("编辑")}
+										</button>
+									</div>
+								) : (
+									<div className="rc-display-edit">
+										<input
+											className="rc-inline-input"
+											placeholder={t("留空使用卡名")}
+											value={displayDraft}
+											onChange={(e) => setDisplayDraft(e.target.value)}
+											onKeyDown={(e) => {
+												if (e.key === "Enter") void saveDisplayName();
+												if (e.key === "Escape") setEditingDisplay(false);
+											}}
+										/>
+										<button type="button" className="rc-btn rc-btn-primary" disabled={busy} onClick={() => void saveDisplayName()}>
+											{t("保存")}
+										</button>
+										<button type="button" className="rc-btn" disabled={busy} onClick={() => setEditingDisplay(false)}>
+											{t("取消")}
+										</button>
 									</div>
 								)}
+								<div className="field-hint">{data.path}</div>
 							</div>
 						</div>
+
+						{onToggleLorePicker && (
+							<button
+								type="button"
+								className={`rc-lore-entry-btn ${lorePickerOpen ? "active" : ""}`}
+								style={{ marginBottom: 10 }}
+								onClick={onToggleLorePicker}
+								aria-expanded={lorePickerOpen}
+							>
+								<IconLorebook size={14} className="rc-lore-entry-icon" />
+								<span className="rc-lore-entry-label">{t("世界书")}</span>
+								<span className="rc-lore-entry-meta">
+									{activeLoreCount > 0 ? t("已挂 {n} 本", { n: activeLoreCount }) : t("未挂载")}
+								</span>
+								{lockedLoreForCard && (
+									<span className="rc-lore-locked-tag">{t("本卡已存")}</span>
+								)}
+								<span className="rc-lore-entry-action">
+									{lorePickerOpen ? t("收起") : t("选择世界书")}
+								</span>
+							</button>
+						)}
+
 						<div className="panel-row card-actions-row" style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
 							<div className="card-export-group" style={{ display: "inline-flex", gap: 6 }}>
 								<button type="button" className="drawer-btn" disabled={busy} onClick={() => doExport("json")}>
@@ -453,7 +553,6 @@ function CardDetail({
 						<EditableSection title={t("作者注")} text={data.creatorNotes} editable={fieldEditable} onSave={(v) => saveField({ creatorNotes: v })} />
 					</section>
 
-					<CardAuthoring key={data.path} card={data.path} onApplied={() => { reload(); onFrontChange?.(); }} />
 					<section className="sp-section">
 						<div className="greeting-sec-head">
 							<h4>{t("开场白（{n}）", { n: data.greetings.length })}</h4>
@@ -507,7 +606,7 @@ function CardItem({
 	onDelete: (c: CardLibItem) => void;
 }) {
 	return (
-		<div className={`card-item card-item-${view} ${current ? "current" : ""}`}>
+		<div className={`card-item card-item-${view} ${current ? "current" : ""} ${c.fav ? "fav" : ""}`}>
 			<button
 				className="card-pick"
 				disabled={busy}
@@ -522,19 +621,10 @@ function CardItem({
 				<span className="card-name" title={c.name}>
 					{c.name}
 				</span>
-				{view === "list" && c.tags.length > 0 && (
-					<span className="card-tags">
-						{c.tags.slice(0, 3).map((t) => (
-							<span key={t} className="chip">
-								{t}
-							</span>
-						))}
-					</span>
-				)}
 			</button>
 			<button
 				className={`card-fav ${c.fav ? "on" : ""}`}
-				title={c.fav ? t("取消收藏") : t("收藏（排序可选「收藏」查看）")}
+				title={c.fav ? t("取消收藏") : t("收藏并置顶")}
 				aria-label={c.fav ? t("取消收藏") : t("收藏")}
 				onClick={() => onFav(c)}
 			>
@@ -568,22 +658,158 @@ interface LorePrompt {
 	items: LorePromptItem[];
 }
 
+export function CardLorePicker({
+	toast,
+	onClose,
+}: {
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+	onClose: () => void;
+}) {
+	const { data, error, loading, reload } = usePanelData(() => apiGet<LorebooksResponse>("/api/lorebooks"), {
+		cacheKey: "/api/lorebooks",
+		watchAgent: true,
+	});
+	const { busy, run } = useAction(toast);
+	const [query, setQuery] = useState("");
+
+	const active = useMemo(() => normalizeActiveLorebooks(data?.active ?? null), [data?.active]);
+	const activeSet = useMemo(() => new Set(active), [active]);
+	const lockedForCard = Boolean(data?.lockedForCard);
+
+	const filteredBooks = useMemo(() => {
+		const list = data?.books ?? [];
+		const q = query.trim().toLowerCase();
+		if (!q) return list;
+		return list.filter((b) => b.name.toLowerCase().includes(q) || b.path.toLowerCase().includes(q));
+	}, [data?.books, query]);
+
+	const toggleBook = (path: string) => {
+		run(async () => {
+			await apiPost("/api/lorebooks/select", { path });
+			reload();
+			bumpWatchPanels();
+		});
+	};
+
+	const clearAll = () =>
+		run(async () => {
+			await apiPost("/api/lorebooks/select", { paths: [] });
+			reload();
+			bumpWatchPanels();
+		}, t("已卸下全部世界书"));
+
+	const toggleLockToCard = (checked: boolean) =>
+		run(
+			async () => {
+				await apiPost("/api/lorebooks/select", { lockToCard: checked });
+				reload();
+				bumpWatchPanels();
+			},
+			checked ? t("已保存为本卡默认世界书") : t("已取消本卡默认世界书"),
+		);
+
+	return (
+		<aside className="rc-lore-picker" aria-label={t("世界书选择")}>
+			<div className="panel-head rc-lore-picker-head">
+				<span className="panel-head-title">
+					<IconLorebook size={15} />
+					<span>{t("世界书选择")}</span>
+				</span>
+				<span className="panel-head-actions">
+					<button
+						type="button"
+						className="icon-btn"
+						onClick={onClose}
+						title={t("关闭")}
+						aria-label={t("关闭")}
+					>
+						<IconClose size={15} />
+					</button>
+				</span>
+			</div>
+			<div className="panel-body rc-lore-picker-body">
+				<PanelStatus loading={loading} error={error} hasData={!!data} />
+				{data && (
+					<>
+						<label className={`rc-lore-save-box ${lockedForCard ? "on" : ""}`}>
+							<div className="rc-lore-save-row">
+								<input
+									type="checkbox"
+									checked={lockedForCard}
+									disabled={busy}
+									onChange={(e) => void toggleLockToCard(e.target.checked)}
+								/>
+								<span className="rc-lore-save-title">{t("保存本卡世界书选择")}</span>
+							</div>
+							<div className="field-hint">
+								{t("开启后记住当前勾选的世界书，下次打开这张卡时自动切换为这几本。")}
+							</div>
+						</label>
+
+						<div className="rc-lore-toolbar">
+							<SearchInput value={query} onChange={setQuery} placeholder={t("搜索世界书…")} />
+							<div className="book-toolbar">
+								<span className="lore-meta">{t("会话已挂 {n} 本", { n: active.length })}</span>
+								{active.length > 0 && (
+									<button type="button" className="act" disabled={busy} onClick={() => void clearAll()}>
+										{t("全部卸下")}
+									</button>
+								)}
+							</div>
+						</div>
+
+						{filteredBooks.length === 0 ? (
+							<div className="sp-empty">
+								{data.books.length === 0
+									? t("还没有世界书——可以「＋ 新建」自己写，也可以导入 JSON")
+									: t("此书无匹配条目。")}
+							</div>
+						) : (
+							<div className="rc-lore-book-list">
+								{filteredBooks.map((b) => {
+									const mounted = activeSet.has(b.path);
+									return (
+										<button
+											key={b.path}
+											type="button"
+											className={`rc-lore-book-item ${mounted ? "mounted" : ""}`}
+											disabled={busy}
+											onClick={() => toggleBook(b.path)}
+										>
+											<span className={`check ${mounted ? "on" : ""}`} aria-checked={mounted} role="checkbox" />
+											<span className="rc-lore-book-name">{b.name}</span>
+											<span className="lore-meta">{t("{n} 条条目", { n: b.entryCount })}</span>
+											{mounted && <span className="lore-meta book-mounted-tag">{t("已挂")}</span>}
+										</button>
+									);
+								})}
+							</div>
+						)}
+					</>
+				)}
+			</div>
+		</aside>
+	);
+}
+
 export function CardPanel({
 	toast,
-	/** 点卡/换卡后离开主页进入对话（学 ST） */
 	onEnterChat,
-	/** 删除当前使用中的卡后回主页 */
 	onGoHome,
-	/** 侧栏是否正在显示本面板；每次重新打开时若有当前卡则进详情 */
 	active = true,
-	/** 卡皮肤开关变更后通知 App 重拉显示规则 */
 	onFrontChange,
+	onOpenStudio,
+	lorePickerOpen,
+	onToggleLorePicker,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
 	onEnterChat?: () => void;
 	onGoHome?: () => void;
 	active?: boolean;
 	onFrontChange?: () => void;
+	onOpenStudio?: () => void;
+	lorePickerOpen?: boolean;
+	onToggleLorePicker?: () => void;
 }) {
 	const lib = usePanelData(() => apiGet<CardsResponse>("/api/cards"), { cacheKey: "/api/cards" });
 	const { busy, run } = useAction(toast);
@@ -595,34 +821,28 @@ export function CardPanel({
 		setImportLore(true);
 		setLorePrompt({ items });
 	};
-	/** 删除确认弹窗：目标卡 + 两个勾选 */
 	const [deletePrompt, setDeletePrompt] = useState<CardLibItem | null>(null);
 	const [delLore, setDelLore] = useState(false);
 	const [delData, setDelData] = useState(false);
-	/** 本地「当前卡」覆盖：换卡后不立刻 reload 整库（避免封面重刷） */
 	const [currentPath, setCurrentPath] = useState<string | null>(null);
 	const wasActive = useRef(active);
 
 	const [query, setQuery] = useState("");
 	const [sort, setSort] = useState<CardSort>(() => (localStorage.getItem("liyuan.cards.sort") as CardSort) || "recent");
 	const [view, setView] = useState<CardView>(() => (localStorage.getItem("liyuan.cards.view") as CardView) || "list");
-	const [tagFilter, setTagFilter] = useState<string | null>(null);
 	const fileRef = useRef<HTMLInputElement>(null);
 	const [importing, setImporting] = useState(false);
 	const [pathInput, setPathInput] = useState("");
-	// 用户自己新建一张卡（8/29：此前只能导入酒馆卡，不能创作）
 	const [creating, setCreating] = useState(false);
 	const [newCardName, setNewCardName] = useState("");
 	const [newFirstMes, setNewFirstMes] = useState("");
 	const [newDesc, setNewDesc] = useState("");
-	/** 卡名 + 开场白是硬底线：没有开场白的卡开不了场（服务端同样拒） */
 	const canCreateCard = newCardName.trim().length > 0 && newFirstMes.trim().length > 0;
 
 	useEffect(() => {
 		if (lib.data?.current) setCurrentPath(lib.data.current);
 	}, [lib.data?.current]);
 
-	// 侧栏从收起→打开：有当前卡则直接进详情（修手机端「再进又是仓库」）
 	useEffect(() => {
 		const opened = active && !wasActive.current;
 		wasActive.current = active;
@@ -640,42 +860,26 @@ export function CardPanel({
 		localStorage.setItem("liyuan.cards.view", v);
 	};
 
-	const topTags = useMemo(() => {
-		const count = new Map<string, number>();
-		for (const c of lib.data?.cards ?? []) for (const t of c.tags) count.set(t, (count.get(t) ?? 0) + 1);
-		return [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([t]) => t);
-	}, [lib.data]);
-
 	const shown = useMemo(() => {
 		const q = query.trim().toLowerCase();
 		let list = (lib.data?.cards ?? []).filter(
-			(c) =>
-				(!q || c.name.toLowerCase().includes(q) || c.tags.some((t) => t.toLowerCase().includes(q))) &&
-				(!tagFilter || c.tags.includes(tagFilter)),
+			(c) => !q || c.name.toLowerCase().includes(q) || c.tags.some((t) => t.toLowerCase().includes(q)),
 		);
 		list = [...list].sort((a, b) => {
-			if (sort === "fav") {
-				// 收藏在前，同组按最近修改
-				if (a.fav !== b.fav) return a.fav ? -1 : 1;
-				return b.mtimeMs - a.mtimeMs;
-			}
+			if (a.fav !== b.fav) return a.fav ? -1 : 1;
 			if (sort === "name") return a.name.localeCompare(b.name);
-			return b.mtimeMs - a.mtimeMs; // recent
+			return b.mtimeMs - a.mtimeMs;
 		});
 		return list;
-	}, [lib.data, query, sort, tagFilter]);
+	}, [lib.data, query, sort]);
 
 	const effectiveCurrent = currentPath ?? lib.data?.current ?? null;
 	const currentLibItem = lib.data?.cards.find((c) => c.path === effectiveCurrent);
 
-	/**
-	 * 换卡就绪：进对话 + 侧栏详情；不 reload 卡库（避免封面整页重下）。
-	 * 仅「本次导入后尚未回答过」且含内嵌世界书时弹窗。
-	 */
 	const afterCardReady = (info: { name: string; path: string; embeddedLoreCount: number }) => {
+		apiGetCacheClear("/api/card");
 		setCurrentPath(info.path);
-		// 离开主页，进入该卡会话对话（switch 已由调用方完成）
-		onEnterChat?.();
+		bumpWatchPanels();
 		if (info.embeddedLoreCount > 0 && isLorePending(info.path)) {
 			openLorePrompt([
 				{
@@ -699,7 +903,6 @@ export function CardPanel({
 		}
 		setLorePrompt(null);
 		setDetail(true);
-		onEnterChat?.();
 	};
 
 	const confirmLoreImport = (mountCurrent: boolean) =>
@@ -720,7 +923,6 @@ export function CardPanel({
 			}
 			setLorePrompt(null);
 			setDetail(true);
-			onEnterChat?.();
 			bumpWatchPanels();
 			const mountedItem = r.results?.find((x) => x.mounted);
 			if (mountedItem?.path) {
@@ -732,18 +934,16 @@ export function CardPanel({
 			}
 		}, mountCurrent ? t("配套世界书已导入并加入挂载") : t("配套世界书已导入（未挂载）"));
 
-	// ST 交互：点卡即切换并进对话；同卡再点也进对话（不重复 switch）
 	const pick = (c: CardLibItem) => {
 		if (c.path === effectiveCurrent) {
-			onEnterChat?.();
 			setDetail(true);
 			return;
 		}
 		void run(async () => {
 			const r = await apiPost<{ name: string; path: string; embeddedLoreCount: number; promoted?: boolean }>("/api/card/switch", {
 				card: c.path,
+				switchSession: false,
 			});
-			// 暂存卡升格后路径已变（旧条目失效）：重拉一次；普通切换不重拉，避免封面重下
 			if (r.promoted) lib.reload();
 			afterCardReady({
 				name: r.name,
@@ -757,6 +957,7 @@ export function CardPanel({
 		run(async () => {
 			const r = await apiPost<{ name: string; path: string; embeddedLoreCount: number; promoted?: boolean }>("/api/card/switch", {
 				card: p,
+				switchSession: false,
 			});
 			if (r.promoted) lib.reload();
 			afterCardReady({
@@ -788,7 +989,6 @@ export function CardPanel({
 			setDeletePrompt(null);
 			clearLorePending(c.path);
 			if (wasCurrent) {
-				// 删的是正在对话的卡：回主页（后端已自动切到剩余卡）
 				setCurrentPath(r.switchedTo ?? null);
 				setDetail(false);
 				onGoHome?.();
@@ -797,12 +997,6 @@ export function CardPanel({
 			bumpWatchPanels();
 		}, delData ? t("已删除「{name}」", { name: deletePrompt?.name ?? "" }) : t("已删除「{name}」（数据保留，重新导入可续玩）", { name: deletePrompt?.name ?? "" }));
 
-	/**
-	 * 新建一张空白角色卡（8/29）：与「导入卡」并列的另一条入口——用户自己创作，不必先有酒馆卡。
-	 * 只要卡名 + 开场白（开场白是硬底线，没有它卡开不了场）；描述选填。
-	 * 其余字段（性格/场景/对白示例/备选开场白）留给现成的详情编辑界面。
-	 * 建完**不切当前卡**，卡出现在库里由用户自己点开——与 agent 的 card_create 同一语义。
-	 */
 	const doCreateCard = () =>
 		run(async () => {
 			const name = newCardName.trim();
@@ -849,18 +1043,19 @@ export function CardPanel({
 				}
 			}
 			lib.reload();
-			// 导入后自动切换到最后一张；有内嵌书且 pending 则询问配套世界书
 			if (last) {
 				void run(async () => {
 					const r = await apiPost<{ name: string; path: string; embeddedLoreCount: number; promoted?: boolean }>("/api/card/switch", {
 						card: last!.path,
+						switchSession: false,
 					});
 					if (r.promoted) lib.reload();
 					const path = r.path ?? last!.path;
 					markLorePending(path);
 					if (path !== last!.path) markLorePending(last!.path);
 					setCurrentPath(path);
-					onEnterChat?.();
+					apiGetCacheClear("/api/card");
+					bumpWatchPanels();
 					if (withLore.length > 0) {
 						openLorePrompt(
 							withLore.map((it) => ({
@@ -1032,10 +1227,9 @@ export function CardPanel({
 
 						<SearchInput value={query} onChange={setQuery} placeholder={t("搜索卡名 / 标签…")} />
 						<div className="panel-row list-toolbar">
-							<select className="panel-search" value={sort} onChange={(e) => setSortP(e.target.value as CardSort)} aria-label={t("排序方式")}>
+							<select className="panel-search" value={sort === "fav" ? "recent" : sort} onChange={(e) => setSortP(e.target.value as CardSort)} aria-label={t("排序方式")}>
 								<option value="recent">{t("最近修改")}</option>
 								<option value="name">{t("按名字")}</option>
-								<option value="fav">{t("收藏")}</option>
 							</select>
 							<button
 								className="drawer-btn"
@@ -1108,19 +1302,6 @@ export function CardPanel({
 								</div>
 							</div>
 						)}
-						{topTags.length > 0 && (
-							<div className="tag-row">
-								{topTags.map((t) => (
-									<button
-										key={t}
-										className={`chip chip-btn ${tagFilter === t ? "chip-active" : ""}`}
-										onClick={() => setTagFilter(tagFilter === t ? null : t)}
-									>
-										{t}
-									</button>
-								))}
-							</div>
-						)}
 						{shown.length === 0 && <div className="sp-empty">{t("没有匹配的卡。把 PNG/JSON 角色卡拖进面板即可导入。")}</div>}
 						<div className={view === "grid" ? "card-grid" : "card-list"}>
 							{shown.map((c) => (
@@ -1166,12 +1347,19 @@ export function CardPanel({
 				<div className="card-detail-pane">
 					<CardDetail
 						toast={toast}
-						onBack={() => setDetail(false)}
+						cardPath={effectiveCurrent}
+						onBack={() => {
+							if (lorePickerOpen) onToggleLorePicker?.();
+							setDetail(false);
+						}}
 						libItem={currentLibItem}
 						onDelete={() => {
 							if (currentLibItem) del(currentLibItem);
 						}}
 						onFrontChange={onFrontChange}
+						onOpenStudio={onOpenStudio}
+						lorePickerOpen={lorePickerOpen}
+						onToggleLorePicker={onToggleLorePicker}
 					/>
 				</div>
 			)}

@@ -3,7 +3,7 @@
  * 注意：index.html / / 必须「网络优先」。否则 rebuild 后 hashed 资源改名，
  * 旧 HTML 仍指向已删除的 /assets/index-XXXX.js → 整页白屏。
  */
-const CACHE = "liyuan-shell-v3";
+const CACHE = "liyuan-shell-v4";
 const PRECACHE = [
 	"/favicon.png",
 	"/logo-32.png",

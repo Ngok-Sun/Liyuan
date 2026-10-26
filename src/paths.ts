@@ -145,6 +145,12 @@ export const CHAT_WORLDLINE_FILE = "世界线.json";
 export const CHAT_PANELS_FILE = "面板.json";
 /** 子项目内：向量记忆（旧 .liyuan-memory/scopes/<cardHash>__<sessionId>/） */
 export const CHAT_MEMORY_DIR = "向量记忆";
+/** 子项目内：跨会话前情摘要（会话压缩时同步落盘，同项目新开会话自动接力） */
+export const CHAT_SUMMARY_FILE = "前情提要.md";
+/** 子项目内：项目级 Markdown 记忆与设定文档目录 */
+export const CHAT_DOCS_MEMORY_DIR = "记忆";
+/** 子项目 记忆/ 内：常驻记忆总索引（对齐 Claude Code MEMORY.md） */
+export const CHAT_MEMORY_INDEX_FILE = "MEMORY.md";
 
 /** 文件名安全化：卡名可能含 `\/:*?"<>|`，落盘前统一换 `_`（唯一实现，别再各写一份） */
 export function nameSafe(name: string): string {
@@ -176,9 +182,21 @@ export function chatDirOf(cardDir: string, chatId: string): string {
 export function chatSessionsDirOf(cardDir: string, chatId: string): string {
 	return join(chatDirOf(cardDir, chatId), CHAT_SESSIONS_DIR);
 }
-/** 卡的跨对话记忆目录 */
+/** 卡的跨对话记忆目录（旧） */
 export function cardMemoryDirOf(cardDir: string): string {
 	return join(cardDir, CARD_MEMORY_DIR);
+}
+/** 子项目的 Markdown 记忆目录（`<子项目>/记忆/`） */
+export function chatMemoryDocsDirOf(chatDir: string): string {
+	return join(chatDir, CHAT_DOCS_MEMORY_DIR);
+}
+/** 子项目的常驻记忆索引路径（`<子项目>/记忆/MEMORY.md`） */
+export function chatMemoryIndexPath(chatDir: string): string {
+	return join(chatMemoryDocsDirOf(chatDir), CHAT_MEMORY_INDEX_FILE);
+}
+/** 子项目的跨会话前情提要路径（`<子项目>/前情提要.md`） */
+export function chatSummaryPath(chatDir: string): string {
+	return join(chatDir, CHAT_SUMMARY_FILE);
 }
 
 export const PERSONAS_FILE = ".liyuan-personas.json";
@@ -364,11 +382,24 @@ export function seedStageSystemPrompt(cwd: string, agentDir: string): void {
 		}
 
 		// 副编剧默认人设（PLAN-COMPANION-BOT）：与 APPEND_SYSTEM.md 同一规则，缺失才播种；
-		// 卡级 BOT.md 覆盖它，都缺时退随包 assets/BOT.md
+		// 若为刀 1 未改过的旧默认说明文或含 <style_guide> 的过渡版，自动升级为纯性格版 assets/BOT.md
 		const botPersonaTarget = join(agentDir, "BOT.md");
-		if (!existsSync(botPersonaTarget) && existsSync(shipped("BOT.md"))) {
-			copyFileSync(shipped("BOT.md"), botPersonaTarget);
-			lastAgentMergeLog.push(`已播种副编剧默认人设 BOT.md → ${botPersonaTarget}`);
+		if (existsSync(shipped("BOT.md"))) {
+			const needSeed = !existsSync(botPersonaTarget);
+			const isLegacyDefault =
+				!needSeed &&
+				(() => {
+					try {
+						const cur = readFileSync(botPersonaTarget, "utf8");
+						return cur.includes("你是这张卡的幕后副编剧，服务于这一局扮演的戏外工作") || cur.includes("<style_guide>");
+					} catch {
+						return false;
+					}
+				})();
+			if (needSeed || isLegacyDefault) {
+				copyFileSync(shipped("BOT.md"), botPersonaTarget);
+				lastAgentMergeLog.push(`已播种副编剧默认人设 BOT.md → ${botPersonaTarget}`);
+			}
 		}
 	} catch (err) {
 		console.error(`[liyuan] 播种提示词槽位失败：${err instanceof Error ? err.message : String(err)}`);

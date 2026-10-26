@@ -14,6 +14,7 @@ import {
 	apiGetCacheClearForPanel,
 	apiGetCacheClearForToolNames,
 	apiPost,
+	apiPut,
 	personaAvatarUrl,
 	prefetchPanelApis,
 	uploadFile,
@@ -28,19 +29,18 @@ import {
 	toAttachmentView,
 	type AttachmentView,
 } from "./attachments.ts";
-import { ArtifactPanel } from "./components/ArtifactPanel.tsx";
+import { ArtifactPanel, renderMarkdown } from "./components/ArtifactPanel.tsx";
 import { DraftPanel } from "./components/DraftPanel.tsx";
 import { workspaceSegments } from "./draft-view.ts";
 import type { DraftView } from "./wire.ts";
 import { BrandLogo } from "./components/BrandLogo.tsx";
-import { ConnectPanel } from "./components/ConnectPanel.tsx";
+import { ComposerModelSwitch, ConnectEditorPane, ConnectPanel, type ConnectEditTarget } from "./components/ConnectPanel.tsx";
 import { FloatWindow } from "./components/FloatWindow.tsx";
 import { PreviewRunner, type CardPreviewRequestFrame } from "./components/PreviewRunner.tsx";
-import { CardStudio } from "./components/CardStudio.tsx";
 import { WelcomePanel } from "./components/HomePage.tsx";
 import { StatusPanel } from "./components/StatusPanel.tsx";
 import { UpdateModal, UpdateToast } from "./components/UpdateFlow.tsx";
-import { PanelRefreshContext } from "./components/kit.tsx";
+import { bumpWatchPanels, PanelRefreshContext } from "./components/kit.tsx";
 import { registerLiyuanToast, registerTavernChatBridge } from "./tavernShim.ts";
 import { syncCardRuntimeVariables } from "./cardRuntimeFrames.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
@@ -65,6 +65,9 @@ import {
 	IconLorebook,
 	IconNewChat,
 	IconPanelLeft,
+	IconPersona,
+	IconBot,
+	IconMore,
 	IconPreset,
 	IconPuzzle,
 	IconRefresh,
@@ -110,11 +113,14 @@ import { skinAtDepth } from "../../src/postprocess.ts";
 import { PanelDock } from "./components/PanelDock.tsx";
 import { PanelOrb } from "./components/PanelOrb.tsx";
 import { PowersPanel } from "./components/PowersPanel.tsx";
-import { PresetPanel } from "./components/PresetPanel.tsx";
+import { PresetPanel, PresetEditorPane, type PresetEditTarget } from "./components/PresetPanel.tsx";
 import { RolesPanel, type RolesTab } from "./components/RolesPanel.tsx";
+import { CardLorePicker } from "./components/CardPanel.tsx";
 import { RosterPanel } from "./components/RosterPanel.tsx";
 import { ScriptHost } from "./components/ScriptHost.tsx";
-import { SessionsPanel, NewProjectBox, nextProjectName } from "./components/SessionsPanel.tsx";
+import { SessionsPanel, NewProjectBox, nextProjectName, ChatAssetCenter, type ChatAssetTarget } from "./components/SessionsPanel.tsx";
+import { BotSessionControls } from "./components/BotSessionControls.tsx";
+import type { BotSessionSnapshot } from "../../src/stage/bot-session-types.ts";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { AboutPanel } from "./components/AboutPanel.tsx";
 import { ThemePanel } from "./components/ThemePanel.tsx";
@@ -130,6 +136,8 @@ import type {
 	RpPanel,
 	ServerFrame,
 	WireActivity,
+	WireBotMsg,
+	WireBotToolCall,
 	WireChatInfo,
 	WireSessionInfo,
 	WireStats,
@@ -191,7 +199,11 @@ const agentId = (name: string): AgentPanelId => `agent:${name}`;
  * 判据只有一条：**换一个会话它还在不在**。在＝资产/配置，进抽屉；不在＝这一场戏的
  * 运行时状态，留聊天面或会话树。以后新面板往哪放照这条问，不必一事一议。
  */
-const DRAWER_SECTIONS: PanelId[] = ["roles", "connect", "preset", "lorebook", "powers", "theme", "uploads"];
+const PRIMARY_NAV_SECTIONS: PanelId[] = ["roles", "connect", "preset", "lorebook", "powers"];
+const MORE_NAV_SECTIONS: PanelId[] = ["uploads", "theme"];
+const MOBILE_PRIMARY_TABS: PanelId[] = ["roles", "connect", "preset"];
+const MOBILE_MORE_TABS: PanelId[] = ["lorebook", "powers", "uploads", "theme"];
+const DRAWER_SECTIONS: PanelId[] = [...PRIMARY_NAV_SECTIONS, ...MORE_NAV_SECTIONS];
 /** 抽屉可开全集＝轨位 + 轨底的设置与关于 */
 const DRAWER_PANELS: PanelId[] = [...DRAWER_SECTIONS, "settings", "about"];
 /** 右栏可开面板：状态栏 / 世界线 / 登场名录 / 会话树 / agent 面板（桌面端平立分栏，会话左移） */
@@ -243,22 +255,14 @@ const PANEL_ICON: Record<PanelId, (p: { size?: number }) => React.JSX.Element> =
 };
 
 function loadPanelPrefs(): { left: PanelId | null; right: PanelId | null; lastSection: PanelId | null } {
-	// 首启默认展开左栏卡库（2026-09-12 用户反馈：左栏收着时首屏只剩孤零零一个输入框，难看）
-	const DEFAULT_LEFT: PanelId = "roles";
+	// 左栏改为常驻导航＋会话树，板块在右侧主工作区全宽铺开，故首启默认展示对话舞台（left = null）
 	try {
 		const raw = JSON.parse(localStorage.getItem("liyuan.panels") ?? "{}") as Record<string, unknown>;
 		const pick = (v: unknown, group: PanelId[]) => (group.includes(v as PanelId) ? (v as PanelId) : null);
 		const lastSection = pick(raw.left, DRAWER_PANELS);
-		/**
-		 * 手机上抽屉是铺满的：还原成「开着」＝打开应用先看见面板而不是聊天，
-		 * 与「聊天界面保持干净」相反。所以窄屏只记住是哪一格，不记住开着。
-		 * 桌面抽屉浮在左留白上，不挡聊天，沿用原来的还原行为。
-		 */
-		const mobile = typeof matchMedia !== "undefined" && matchMedia("(max-width: 999px)").matches;
-		return { left: mobile ? null : (lastSection ?? DEFAULT_LEFT), right: pick(raw.right, RIGHT_OPENABLE), lastSection };
+		return { left: null, right: pick(raw.right, RIGHT_OPENABLE), lastSection };
 	} catch {
-		const mobile = typeof matchMedia !== "undefined" && matchMedia("(max-width: 999px)").matches;
-		return { left: mobile ? null : DEFAULT_LEFT, right: null, lastSection: null };
+		return { left: null, right: null, lastSection: null };
 	}
 }
 
@@ -289,6 +293,7 @@ export default function App() {
 	const [storyFiles, setStoryFiles] = useState<StoryFileView[] | null>(null);
 	/** 手机：稿子与讨论是左右两页，横滑切换；这个值是当前停在哪一页 */
 	const [storyTab, setStoryTab] = useState<"story" | "chat">("chat");
+	const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 	/** 桌面：稿子占分栏的比例（可拖）与讨论栏是否收起，都记在本浏览器 */
 	const [storyFrac, setStoryFrac] = useState(() => {
 		try {
@@ -326,6 +331,10 @@ export default function App() {
 	// 顶栏「新建」：点击出两项（新建项目 / 新建对话，2026-09-14 用户点名——一般先建项目）
 	const [newMenuOpen, setNewMenuOpen] = useState(false);
 	const [namingProject, setNamingProject] = useState(false);
+	// 顶栏右上角「用户角色」快速切换气泡
+	const [personaMenuOpen, setPersonaMenuOpen] = useState(false);
+	const [personaStore, setPersonaStore] = useState<PersonasResponse | null>(null);
+	const [personaSwitching, setPersonaSwitching] = useState(false);
 	const [input, setInput] = useState("");
 	// 待发送附件（附件随消息，上传即落服务端 .liyuan-uploads/，发送时路径附在消息尾行）
 	const [pending, setPending] = useState<PendingUpload[]>([]);
@@ -342,6 +351,23 @@ export default function App() {
 	 * 前端先发 `/note`（多条＝一个命令多行）再发动作；不进入剧情历史，用完即清。
 	 */
 	const [noteRows, setNoteRows] = useState<string[]>([]);
+	// 幕后副编剧 Bot 伴随抽屉状态（PLAN-COMPANION-BOT 刀 3）
+	const [botOpen, setBotOpen] = useState(false);
+	const [botSession, setBotSession] = useState<BotSessionSnapshot | null>(null);
+	const [botMessages, setBotMessages] = useState<WireBotMsg[]>([]);
+	const [botStreaming, setBotStreaming] = useState(false);
+	const [botStreamText, setBotStreamText] = useState("");
+	const [botStreamThinking, setBotStreamThinking] = useState("");
+	const [botLiveTools, setBotLiveTools] = useState<WireBotToolCall[]>([]);
+	const [botInput, setBotInput] = useState("");
+	const [botSettingsOpen, setBotSettingsOpen] = useState(false);
+	const [botSettingsScope, setBotSettingsScope] = useState<"global" | "card">("global");
+	const [botGlobalPersona, setBotGlobalPersona] = useState("");
+	const [botCardPersona, setBotCardPersona] = useState("");
+	const [botPresets, setBotPresets] = useState<Array<{ id: string; name: string; tagline: string; content: string }>>([]);
+	const [botViewBeats, setBotViewBeats] = useState<number>(0);
+	const [botSavingSettings, setBotSavingSettings] = useState(false);
+	const botScrollRef = useRef<HTMLDivElement>(null);
 	const [sessions, setSessions] = useState<WireSessionInfo[] | null>(null);
 	/** 两层布局的子项目清单（null＝老布局/未下发 ⇒ 面板回落扁平列表） */
 	const [chats, setChats] = useState<WireChatInfo[] | null>(null);
@@ -356,16 +382,44 @@ export default function App() {
 	const [previewRequest, setPreviewRequest] = useState<CardPreviewRequestFrame | null>(null);
 	// agent 自建面板（柱 2）：server 推送的活跃面板全量（页签序）；入口在面板坞，展开到左栏
 	const [agentPanels, setAgentPanels] = useState<RpPanel[]>([]);
-	// 面板系统
+	// 面板系统：sidebarOpen 控制左栏（上导航＋下会话树）的开合；leftPanel 控制右侧主工作区当前展示的设置/资产板块
 	const initialPanels = useMemo(loadPanelPrefs, []);
+	const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+		const mobile = typeof matchMedia !== "undefined" && matchMedia("(max-width: 999px)").matches;
+		if (mobile) return false;
+		try {
+			return localStorage.getItem("liyuan.sidebarOpen") !== "0";
+		} catch {
+			return true;
+		}
+	});
+	const [navMoreOpen, setNavMoreOpen] = useState(false);
 	const [leftPanel, setLeftPanel] = useState<PanelId | AgentPanelId | null>(initialPanels.left);
 	const [rightPanel, setRightPanel] = useState<PanelId | AgentPanelId | null>(initialPanels.right);
 	/** 悬浮窗当前显示的面板（与左右栏并列的第三种形态，同时只开一个） */
 	const [floatPanel, setFloatPanel] = useState<PanelId | AgentPanelId | null>(null);
 	const [studioOpen, setStudioOpen] = useState(false);
+	const [cardLoreOpen, setCardLoreOpen] = useState(false);
+	const [connectEditorTarget, setConnectEditorTarget] = useState<ConnectEditTarget | null>(null);
+	const [presetEditorTarget, setPresetEditorTarget] = useState<PresetEditTarget | null>(null);
+	const sidebarBeforeStudioRef = useRef<boolean | null>(null);
 		const [centerLoreDetail, setCenterLoreDetail] = useState<{ entry: LoreEntryView; scopePath: string } | null>(null);
 		const [centerDenylist, setCenterDenylist] = useState(false);
+		const [centerChatAsset, setCenterChatAsset] = useState<ChatAssetTarget | null>(null);
+		const [chatAssetTick, setChatAssetTick] = useState(0);
 	const [dark, setDark] = useState(() => getTheme() === "dark");
+	useEffect(() => {
+		const handler = (e: Event) => {
+			const custom = e as CustomEvent<{ isDark?: boolean }>;
+			if (typeof custom.detail?.isDark === "boolean") {
+				setDark(custom.detail.isDark);
+			} else {
+				setDark(getTheme() === "dark");
+			}
+		};
+		window.addEventListener("liyuan:theme-change", handler);
+		return () => window.removeEventListener("liyuan:theme-change", handler);
+	}, []);
 	/** 悬浮窗「刷新」用：+1 强制重挂载窗内面板（与侧栏 manualTick 同机制） */
 	const [floatTick, setFloatTick] = useState(0);
 	// 手机（≤999px，与 CSS 抽屉断点一致）：左右栏是全屏抽屉，同时只能开一个。
@@ -376,30 +430,58 @@ export default function App() {
 		const mq = matchMedia("(max-width: 999px)");
 		const sync = () => {
 			mobileRef.current = mq.matches;
-			// 切到手机宽度时若两侧都开着，收起右侧只留左侧，回到「单开」不变量
-			if (mq.matches) setRightPanel((r) => (r && leftPanelRef.current ? null : r));
+			if (mq.matches) {
+				setSidebarOpen(false);
+				setRightPanel((r) => (r && leftPanelRef.current ? null : r));
+			}
 		};
 		sync();
 		mq.addEventListener("change", sync);
 		return () => mq.removeEventListener("change", sync);
 	}, []);
+	useEffect(() => {
+		if (mobileRef.current) return;
+		try { localStorage.setItem("liyuan.sidebarOpen", sidebarOpen ? "1" : "0"); } catch { /* 隐私模式等 */ }
+	}, [sidebarOpen]);
+	const restoreSidebarFromStudio = useCallback(() => {
+		setStudioOpen(false);
+		if (!mobileRef.current && sidebarBeforeStudioRef.current !== null) {
+			setSidebarOpen(sidebarBeforeStudioRef.current);
+			sidebarBeforeStudioRef.current = null;
+		}
+	}, []);
 	/**
-	 * 开左栏：手机上先关右栏（单开不变量）。传 null 或函数式更新按原样透传。
-	 * 悬浮窗形态的面板从这里改道——入口（底栏钮 / `/line` / 会话面板里的跳转）都不必知道它换了形态。
+	 * 切换右侧主工作区展示的板块（roles / connect / preset / lorebook 等）。
+	 * 传 null 即回到对话舞台；手机上选中板块后自动收起左侧导航抽屉。
 	 */
 	const openLeft = useCallback((next: PanelId | AgentPanelId | null) => {
+		setCenterChatAsset(null);
+		setMobileMoreOpen(false);
+		if (next !== "roles") setCardLoreOpen(false);
+		if (next !== "connect") setConnectEditorTarget(null);
+		if (next !== "preset") setPresetEditorTarget(null);
 		if (isFloatPanel(next)) {
 			setFloatPanel(next);
 			return;
 		}
-		if (mobileRef.current && next !== null) setRightPanel(null);
+		restoreSidebarFromStudio();
+		if (next !== null) {
+			setRightPanel(null);
+			if (mobileRef.current) {
+				setSidebarOpen(false);
+			}
+		}
 		setLeftPanel(next);
-	}, []);
-	/** 开右栏：手机上先关左栏（桌面端平立分栏，会话左移） */
+	}, [restoreSidebarFromStudio]);
+	/** 开右栏：收起中间展开面板，避免四栏挤压 */
 	const openRight = useCallback((next: PanelId | AgentPanelId | null) => {
-		if (mobileRef.current && next !== null) setLeftPanel(null);
+		if (next !== null) {
+			restoreSidebarFromStudio();
+			setLeftPanel(null);
+			setCenterChatAsset(null);
+		}
 		setRightPanel(next);
-	}, []);
+	}, [restoreSidebarFromStudio]);
 	/** 切换右栏面板（点同钮收起，点异钮切换） */
 	const toggleRight = useCallback(
 		(id: PanelId | AgentPanelId) => {
@@ -407,20 +489,18 @@ export default function App() {
 		},
 		[openRight],
 	);
-	/** 打开写卡平台：折叠左栏，收起右视窗，4:6桌面分栏展开 */
+	/** 在角色板块内切入 00–09 写卡工坊视图，同时自动折叠左侧栏让出横向空间 */
 	const openStudio = useCallback(() => {
-		openLeft(null);
-		openRight(null);
-		setStudioOpen(true);
-	}, [openLeft, openRight]);
-	/** 切换写卡平台开合 */
-	const toggleStudio = useCallback(() => {
-		if (studioOpen) {
-			setStudioOpen(false);
-		} else {
-			openStudio();
+		if (!mobileRef.current && sidebarBeforeStudioRef.current === null) {
+			sidebarBeforeStudioRef.current = sidebarOpen;
 		}
-	}, [studioOpen, openStudio]);
+		setSidebarOpen(false);
+		setRightPanel(null);
+		setCenterChatAsset(null);
+		setRolesTab("card");
+		setLeftPanel("roles");
+		setStudioOpen(true);
+	}, [sidebarOpen]);
 	/** 角色板块的当前页签：角色卡库 ⇄ 用户角色 */
 	const [rolesTab, setRolesTab] = useState<RolesTab>("card");
 	/** 抽屉上次停在哪一格（收起后仍记住，见落盘 effect 与 toggleDrawer） */
@@ -467,15 +547,10 @@ export default function App() {
 		// 用 lastSection 而非 left：手机上抽屉不还原成开着，但「上次是哪一格」要记住
 		initialPanels.lastSection ? [initialPanels.lastSection] : [],
 	);
-	const [rightKeep, setRightKeep] = useState<Array<PanelId | AgentPanelId>>(() => (initialPanels.right ? [initialPanels.right] : []));
 	useEffect(() => {
 		if (!leftPanel) return;
 		setLeftKeep((prev) => [leftPanel, ...prev.filter((x) => x !== leftPanel)].slice(0, 5));
 	}, [leftPanel]);
-	useEffect(() => {
-		if (!rightPanel) return;
-		setRightKeep((prev) => [rightPanel, ...prev.filter((x) => x !== rightPanel)].slice(0, 5));
-	}, [rightPanel]);
 
 	const streamRef = useRef("");
 	const streamThinkingRef = useRef("");
@@ -797,6 +872,7 @@ export default function App() {
 			}
 			try {
 				const pr = await apiGet<PersonasResponse>("/api/personas");
+				setPersonaStore(pr);
 				const active = pr.personas.find((p) => p.id === pr.activeId);
 				if (active?.avatar) {
 					// 不拼 bust：新鲜度由服务端 ETag 保证（换头像 mtime 就变）。
@@ -871,15 +947,10 @@ export default function App() {
 						setWarnings([]);
 						setActiveChoice(null);
 						turnActsRef.current = [];
-						// 列表「当前」标记已变：重拉（+短延迟再拉一次，等 rp-card 落盘）。
-						// 不清空旧列表——清空只会让面板空白 672ms（实测）再长回来，
-						// 那就是「新建对话时会话记录强制刷新一次」的观感来源。
-						// 旧列表在新列表到达前仍是当时最好的答案，就地替换即可。
-						if (welcomeRef.current || leftPanelRef.current === "sessions") {
-							sendRef.current({ type: "sessions" });
-							window.setTimeout(() => sendRef.current({ type: "sessions" }), 350);
-						}
-					} else if (welcomeRef.current || leftPanelRef.current === "sessions") {
+						// 会话树常驻左栏下半区：列表「当前」标记已变，重拉（+短延迟再拉一次，等 rp-card 落盘）。
+						sendRef.current({ type: "sessions" });
+						window.setTimeout(() => sendRef.current({ type: "sessions" }), 350);
+					} else {
 						// 同会话 hello（重载）：刷新列表
 						sendRef.current({ type: "sessions" });
 					}
@@ -887,6 +958,14 @@ export default function App() {
 						setDraftWorkspace(frame.workspace);
 						setDraftHistory(undefined);
 						setBusy(frame.streaming === true);
+						setBotMessages(frame.botMessages ?? []);
+						setBotSession(frame.botSession ?? null);
+						setBotStreaming(frame.botStreaming === true);
+						if (!frame.botStreaming) {
+							setBotStreamText("");
+							setBotStreamThinking("");
+							setBotLiveTools([]);
+						}
 						if (frame.streaming && frame.workspace && !frame.workspace.entryId) {
 							const segs = workspaceSegments(frame.workspace);
 							setSegs(segs);
@@ -1130,17 +1209,60 @@ export default function App() {
 					if (frame.level !== "info") {
 						setWarnings((ws) => [{ ts: Date.now(), level: frame.level as "warning" | "error", text: frame.text }, ...ws].slice(0, 30));
 					}
-					// 新建/切换后服务端会 notify；若会话面板开着，确保列表与 current 标记更新。
-					// 不按 notify 文案判断（文案随界面语言变）：面板可见时任何 notify 都刷一次，请求很轻。
-					if (welcomeRef.current || leftPanelRef.current === "sessions") {
-						// 同上：不清空，就地替换（清空 = 面板空白一下）
-						sendRef.current({ type: "sessions" });
-						window.setTimeout(() => sendRef.current({ type: "sessions" }), 350);
-					}
+					// 新建/切换后服务端会 notify；会话树常驻左栏下半区，确保列表与 current 标记更新。
+					sendRef.current({ type: "sessions" });
+					window.setTimeout(() => sendRef.current({ type: "sessions" }), 350);
 					break;
 				case "error":
 					pushToast("error", frame.text);
 					setWarnings((ws) => [{ ts: Date.now(), level: "error" as const, text: frame.text }, ...ws].slice(0, 30));
+					break;
+				case "bot_session":
+					setBotSession(frame.snapshot);
+					setBotMessages(frame.snapshot.messages);
+					if (!["running", "compacting"].includes(frame.snapshot.status)) {
+						setBotStreamText(""); setBotStreamThinking(""); setBotLiveTools([]);
+					}
+					break;
+				case "bot_history":
+					setBotMessages(frame.messages);
+					setBotStreamText("");
+					setBotStreamThinking("");
+					setBotLiveTools([]);
+					break;
+				case "bot_state":
+					setBotStreaming(frame.state === "start");
+					setBotStreamText("");
+					setBotStreamThinking("");
+					setBotLiveTools([]);
+					break;
+				case "bot_delta":
+					if (frame.kind === "text") {
+						setBotStreamText((prev) => prev + frame.delta);
+					} else {
+						setBotStreamThinking((prev) => prev + frame.delta);
+					}
+					break;
+				case "bot_activity":
+					setBotLiveTools((prev) => [
+						...prev,
+						{
+							name: frame.activity.name,
+							...(frame.activity.detail ? { detail: frame.activity.detail } : {}),
+							...(frame.activity.isError ? { isError: true } : {}),
+						},
+					]);
+					if (apiGetCacheClearForToolNames([frame.activity.name])) {
+						bumpWatchPanels();
+					}
+					break;
+				case "bot_message":
+					setBotMessages((prev) => [...prev, frame.message]);
+					if (frame.message.role === "assistant") {
+						setBotStreamText("");
+						setBotStreamThinking("");
+						setBotLiveTools([]);
+					}
 					break;
 			}
 		},
@@ -1154,14 +1276,9 @@ export default function App() {
 		if (conn !== "open") return;
 		prefetchPanelApis();
 		const t = window.setTimeout(() => {
-			// 预挂载常用面板进 keep（collapsed 侧栏仍保留 DOM）
-			setRightKeep((prev) => {
-				const next: PanelId[] = ["sessions"];
-				for (const p of prev) if (!next.includes(p as PanelId)) next.push(p as PanelId);
-				return next.slice(0, 8) as PanelId[];
-			});
+			// 预挂载常用面板进 keep（隐藏时仍保留 DOM）
 			setLeftKeep((prev) => {
-				// 角色最贵（封面）也最常开，首位预挂；其余轨位随用随挂
+				// 角色最贵（封面）也最常开，首位预挂；其余随用随挂
 				const base: Array<PanelId | AgentPanelId> = ["roles"];
 				for (const p of prev) if (!base.includes(p)) base.push(p);
 				return base.slice(0, 8);
@@ -1390,7 +1507,10 @@ export default function App() {
 			}
 		}
 		let sent: boolean;
-		if (/^\/compact(?:\s|$)/i.test(typed) && pending.length === 0) {
+		if (/^\/bot(?:\s|$)/i.test(typed) && pending.length === 0) {
+			setBotOpen(true);
+			sent = ws.send({ type: "prompt", text: typed });
+		} else if (/^\/compact(?:\s|$)/i.test(typed) && pending.length === 0) {
 			sent = typed === "/compact" || /^\/compact\s*$/i.test(typed)
 				? ws.send({ type: "compact" })
 				: ws.send({ type: "prompt", text: typed });
@@ -1421,6 +1541,87 @@ export default function App() {
 	// 须接到输入框 / WS，否则界面显示「档案已发送」但聊天栏空白
 	const inputRefForBridge = useRef(input);
 	inputRefForBridge.current = input;
+	useEffect(() => {
+		if (!botOpen) return;
+		const el = botScrollRef.current;
+		if (el) el.scrollTop = el.scrollHeight;
+	}, [botOpen, botMessages, botStreamText, botStreamThinking, botLiveTools]);
+
+	const sendBot = useCallback(
+		(override?: string) => {
+			const q = (override ?? botInput).trim();
+			if (!q) return;
+			if (busy || botStreaming) {
+				pushToast("warning", t("请等当前回复完成（或先停止），再唤副编剧"));
+				return;
+			}
+			if (!ws.send({ type: "bot_prompt", text: q })) {
+				pushToast("warning", t("连接还没好，内容还在输入框里"));
+				return;
+			}
+			if (override === undefined) setBotInput("");
+		},
+		[botInput, botStreaming, busy, pushToast, ws],
+	);
+
+	const openBotSettings = useCallback(async () => {
+		if (botSettingsOpen) {
+			setBotSettingsOpen(false);
+			return;
+		}
+		setBotSettingsOpen(true);
+		try {
+			apiGetCacheClear("/api/bot/settings");
+			const r = await apiGet<{
+				personas: Array<{ id: string; name: string; tagline: string; content: string }>;
+				globalPersona: string;
+				cardPersona: string;
+				activeScope: "global" | "card";
+				botViewBeats: number;
+			}>("/api/bot/settings");
+			setBotPresets(r.personas ?? []);
+			setBotGlobalPersona(r.globalPersona ?? "");
+			setBotCardPersona(r.cardPersona ?? "");
+			setBotSettingsScope(r.activeScope ?? "global");
+			setBotViewBeats(typeof r.botViewBeats === "number" ? r.botViewBeats : 0);
+		} catch (e) {
+			pushToast("error", e instanceof Error ? e.message : String(e));
+		}
+	}, [botSettingsOpen, pushToast]);
+
+	const saveBotSettings = useCallback(async () => {
+		if (botSavingSettings) return;
+		setBotSavingSettings(true);
+		try {
+			const content = botSettingsScope === "card" ? botCardPersona : botGlobalPersona;
+			await apiPut("/api/bot/settings", {
+				scope: botSettingsScope,
+				content,
+				botViewBeats,
+			});
+			setBotSettingsOpen(false);
+			pushToast("ok", t("副编剧设置已保存"));
+		} catch (e) {
+			pushToast("error", e instanceof Error ? e.message : String(e));
+		} finally {
+			setBotSavingSettings(false);
+		}
+	}, [botCardPersona, botGlobalPersona, botSavingSettings, botSettingsScope, botViewBeats, pushToast]);
+
+	const applyBotToNote = useCallback(
+		(raw: string) => {
+			const clean = raw
+				.replace(/^#{1,4}\s+/gm, "")
+				.replace(/\|\|([^|]+)\|\|/g, "$1")
+				.replace(/\s*\n+\s*/g, "；")
+				.trim();
+			if (!clean) return;
+			setNoteRows((rs) => [...rs.filter((x) => x.trim().length > 0), clean]);
+			pushToast("ok", t("已填入台前备注（下一拍生效）"));
+		},
+		[pushToast],
+	);
+
 	const connRef = useRef(conn);
 	connRef.current = conn;
 	useEffect(() => {
@@ -1633,41 +1834,22 @@ export default function App() {
 		pushToast("info", copyText(text) ? t("已复制正文") : t("复制失败（浏览器限制）"));
 	};
 
-	// 面板开合：点同侧同钮=收起；桌面端右侧面板统一走平立分栏（会话左移）
-	const togglePanel = (id: PanelId | AgentPanelId) => {
-		if (DRAWER_PANELS.includes(id as PanelId)) {
-			openLeft(leftPanel === id ? null : id);
-			return;
-		}
-		toggleRight(id);
-		if (id === "sessions" && rightPanel !== "sessions") {
-			// 不清空：保留上次列表当场显示，后台静默重拉（回来替换）。
-			ws.send({ type: "sessions" });
-		}
-	};
-
 	/**
-	 * 顶栏左键：开合抽屉。开的时候回到上次那一格（`leftKeep[0]`），首开落「角色」——
-	 * 用户点名的第一块，也是唯一带封面的一块，开箱即好看。
+	 * 顶栏左键：开合左侧栏（上导航＋下会话树）。
 	 */
 	const toggleDrawer = () => {
-		if (leftPanel) {
-			openLeft(null);
-			return;
-		}
-		const last =
-			lastSectionRef.current ?? (leftKeep.find((x) => DRAWER_PANELS.includes(x as PanelId)) as PanelId | undefined);
-		openLeft(last ?? "roles");
+		setMobileMoreOpen(false);
+		setSidebarOpen((v) => !v);
 	};
 
-	// 欢迎区 / 会话面板：列表为空时补拉（含新建会话后 hello 清空）
+	// 会话树常驻左栏下半区：列表为空时补拉（含新建会话后 hello 清空）
 	useEffect(() => {
 		if (conn !== "open") return;
-		if (welcome || (rightPanel === "sessions" && sessions === null)) {
+		if (sessions === null) {
 			ws.send({ type: "sessions" });
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- ws.send 稳定；sessions 变 null 时要重拉
-	}, [conn, welcome, rightPanel, sessions]);
+	}, [conn, sessions]);
 
 	// 访问时间：未在欢迎态时心跳 + 离开页写入（久未访问 → 下次欢迎）
 	useEffect(() => {
@@ -1697,6 +1879,17 @@ export default function App() {
 						chats={chats}
 						stats={stats}
 						atHome={welcome}
+						activeAsset={centerChatAsset}
+						assetTick={chatAssetTick}
+						onOpenAsset={(asset) => {
+							setCenterChatAsset(asset);
+							if (asset) {
+								setLeftPanel(null);
+								setRightPanel(null);
+								setStudioOpen(false);
+								if (mobileRef.current) setSidebarOpen(false);
+							}
+						}}
 						onOpen={(path) => {
 							// 橙标当前会话：主页→进对话；对话中再点→回主页
 							const isCur = sessions?.some((s) => s.current && s.path === path);
@@ -1737,9 +1930,21 @@ export default function App() {
 					/>
 				);
 			case "connect":
-				return <ConnectPanel toast={pushToast} />;
+				return (
+					<ConnectPanel
+						toast={pushToast}
+						editorTarget={connectEditorTarget}
+						onChangeEditorTarget={setConnectEditorTarget}
+					/>
+				);
 			case "preset":
-				return <PresetPanel toast={pushToast} />;
+				return (
+					<PresetPanel
+						toast={pushToast}
+						editorTarget={presetEditorTarget}
+						onChangeEditorTarget={setPresetEditorTarget}
+					/>
+				);
 			case "powers":
 				return (
 					<>
@@ -1779,14 +1984,33 @@ export default function App() {
 				return (
 					<RolesPanel
 						tab={rolesTab}
-						onTab={setRolesTab}
+						onTab={(t) => {
+							restoreSidebarFromStudio();
+							if (t !== "card") setCardLoreOpen(false);
+							setRolesTab(t);
+						}}
 						toast={pushToast}
-						onOpenStudio={openStudio}
+						studioOpen={studioOpen}
+						onOpenStudio={() => {
+							setCardLoreOpen(false);
+							openStudio();
+						}}
+						onBackFromStudio={restoreSidebarFromStudio}
+						onCloseStudioPanel={() => openLeft(null)}
+						onStudioApplied={() => apiGetCacheClear("/api/card")}
 						active={leftPanel === "roles"}
-						onEnterChat={dismissWelcome}
-						onGoHome={showWelcome}
+						onEnterChat={() => {
+							if (mobileRef.current) openLeft(null);
+							dismissWelcome();
+						}}
+						onGoHome={() => {
+							openLeft(null);
+							showWelcome();
+						}}
 						onFrontChange={() => void refreshCardFront()}
 						headerTabs={true}
+						lorePickerOpen={cardLoreOpen}
+						onToggleLorePicker={() => setCardLoreOpen((v) => !v)}
 					/>
 				);
 			case "lorebook":
@@ -1812,17 +2036,197 @@ export default function App() {
 		}
 	};
 
-	const sidePanel = (id: PanelId | AgentPanelId | null, side: "left" | "right") => {
-		/**
-		 * 关键：以前 `if (!id) return null` 会在收起时卸载整侧 → 再点顶栏整面板冷启动 +「读取中」。
-		 * 现在：打开过的面板始终挂在 keep 里，收起只加 side-collapsed（不占布局、不卸 DOM）。
-		 */
-		const keep = side === "left" ? leftKeep : rightKeep;
+	const moreExpanded = navMoreOpen || (leftPanel != null && MORE_NAV_SECTIONS.includes(leftPanel as PanelId));
+
+	/**
+	 * 左侧栏（仿 WorkBuddy 上下分栏）：
+	 * - 顶部：品牌 ＋「＋ 新建项目」＋ 功能板块导航（角色/连接/提示词/世界书/扩展/更多）
+	 * - 下半区：常驻会话树（按「扮演模式 / 写作模式」切签）
+	 * - 底栏：设置、关于、白天/黑夜切换
+	 */
+	const leftSidebar = () => (
+		<aside
+			className={`side side-left wb-sidebar ${sidebarOpen ? "" : "side-collapsed"}`}
+			aria-hidden={!sidebarOpen}
+		>
+			<div className="wb-side-head">
+				<button
+					type="button"
+					className="wb-brand-btn"
+					title={t("欢迎页")}
+					aria-label={t("打开欢迎页")}
+					onClick={() => {
+						setCenterChatAsset(null);
+						setLeftPanel(null);
+						if (welcome) listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+						else showWelcome();
+						if (mobileRef.current) setSidebarOpen(false);
+					}}
+				>
+					<BrandLogo className="brand-logo" size={24} />
+					<span className="wb-brand-title">{t("梨园")}</span>
+				</button>
+			</div>
+
+			<nav className="wb-nav" aria-label={t("板块")}>
+				{PRIMARY_NAV_SECTIONS.map((sid) => {
+					const Ic = PANEL_ICON[sid];
+					const active = leftPanel === sid;
+					return (
+						<button
+							key={sid}
+							type="button"
+							className={`wb-nav-item ${active ? "active" : ""}`}
+							onClick={() => openLeft(active ? null : sid)}
+							aria-current={active}
+						>
+							<Ic size={16} />
+							<span>{panelLabel(sid)}</span>
+						</button>
+					);
+				})}
+
+				<button
+					type="button"
+					className={`wb-nav-item wb-nav-more-btn ${moreExpanded ? "expanded" : ""}`}
+					onClick={() => setNavMoreOpen((v) => !v)}
+					aria-expanded={moreExpanded}
+				>
+					<IconMore size={16} />
+					<span>{t("更多")}</span>
+					<IconChevronDown size={14} className="wb-nav-more-caret" />
+				</button>
+
+				{moreExpanded &&
+					MORE_NAV_SECTIONS.map((sid) => {
+						const Ic = PANEL_ICON[sid];
+						const active = leftPanel === sid;
+						return (
+							<button
+								key={sid}
+								type="button"
+								className={`wb-nav-item wb-nav-item-sub ${active ? "active" : ""}`}
+								onClick={() => openLeft(active ? null : sid)}
+								aria-current={active}
+							>
+								<Ic size={16} />
+								<span>{panelLabel(sid)}</span>
+							</button>
+						);
+					})}
+			</nav>
+
+			<div className="wb-sessions">
+				<SessionsPanel
+					compactSidebar
+					sessions={sessions}
+					chats={chats}
+					stats={stats}
+					atHome={welcome && !leftPanel}
+					activeAsset={centerChatAsset}
+					assetTick={chatAssetTick}
+					onOpenAsset={(asset) => {
+						setCenterChatAsset(asset);
+						if (asset) {
+							setLeftPanel(null);
+						}
+					}}
+					onOpen={(path) => {
+						const isCur = sessions?.some((s) => s.current && s.path === path);
+						if (leftPanel) {
+							setLeftPanel(null);
+							if (mobileRef.current) setSidebarOpen(false);
+							if (!isCur) ws.send({ type: "open", path });
+							dismissWelcome();
+							return;
+						}
+						if (mobileRef.current) setSidebarOpen(false);
+						if (isCur) {
+							if (welcome) dismissWelcome();
+							else showWelcome();
+							return;
+						}
+						ws.send({ type: "open", path });
+						dismissWelcome();
+					}}
+					onNew={(name, mode, greeting) => {
+						setLeftPanel(null);
+						if (mobileRef.current) setSidebarOpen(false);
+						ws.send({ type: "new", ...(name ? { name } : {}), ...(mode ? { mode } : {}), ...(greeting !== undefined ? { greeting } : {}) });
+						dismissWelcome();
+					}}
+					onNewInChat={(chatId) => {
+						setLeftPanel(null);
+						if (mobileRef.current) setSidebarOpen(false);
+						ws.send({ type: "chat_new_session", chatId });
+						dismissWelcome();
+					}}
+					onCompact={() => ws.send({ type: "compact" })}
+					onWorldline={() => {
+						setLeftPanel(null);
+						toggleRight("worldline");
+					}}
+					onStore={openStoreModal}
+					onRefresh={() => {
+						ws.send({ type: "sessions" });
+					}}
+					toast={pushToast}
+				/>
+			</div>
+
+			<div className="wb-side-foot">
+				<div className="wb-foot-left">
+					<button
+						type="button"
+						className={`wb-foot-btn ${leftPanel === "settings" ? "active" : ""}`}
+						onClick={() => openLeft(leftPanel === "settings" ? null : "settings")}
+						aria-current={leftPanel === "settings"}
+						title={t("设置")}
+					>
+						<IconSettings size={15} />
+						<span>{t("设置")}</span>
+					</button>
+					<button
+						type="button"
+						className={`wb-foot-btn ${leftPanel === "about" ? "active" : ""}`}
+						onClick={() => openLeft(leftPanel === "about" ? null : "about")}
+						aria-current={leftPanel === "about"}
+						title={t("关于")}
+					>
+						<IconInfo size={15} />
+						<span>{t("关于")}</span>
+					</button>
+				</div>
+				<button
+					type="button"
+					className="wb-foot-icon"
+					onClick={() => {
+						const curDark = getTheme() === "dark";
+						const next = curDark ? "light" : "dark";
+						setTheme(next);
+						setDark(next === "dark");
+						pushToast("info", next === "dark" ? t("已切换到黑夜模式") : t("已切换到白昼模式"));
+					}}
+					aria-label={dark ? t("切换到白天") : t("切换到黑夜")}
+					aria-pressed={dark}
+					title={dark ? t("白天") : t("黑夜")}
+				>
+					{dark ? <IconSun size={16} /> : <IconMoon size={16} />}
+				</button>
+			</div>
+		</aside>
+	);
+
+	/**
+	 * 右侧主工作区的全宽板块视图（当左栏选中某个板块时铺满主工作区；保活 leftKeep 不卸载）
+	 */
+	const workspaceSectionView = () => {
+		const id = leftPanel;
 		const ids: Array<PanelId | AgentPanelId> = id
-			? keep.includes(id)
-				? keep
-				: [id, ...keep.filter((x) => x !== id)].slice(0, 5)
-			: keep;
+			? leftKeep.includes(id)
+				? leftKeep
+				: [id, ...leftKeep.filter((x) => x !== id)].slice(0, 5)
+			: leftKeep;
 		if (ids.length === 0) return null;
 
 		const open = id != null;
@@ -1832,94 +2236,18 @@ export default function App() {
 		const HeadIcon = agent ? IconDock : PANEL_ICON[headId as PanelId];
 		const refreshable = !agent;
 		const doRefresh = () => {
-			if (id === "sessions") {
-				ws.send({ type: "sessions" });
-				return;
-			}
-			// 先清该面板 GET 缓存，再 remount：否则 peek / 旧缓存会让「刷新」假成功
 			if (id && !id.startsWith("agent:")) apiGetCacheClearForPanel(id);
-			// 仅强制重挂载当前可见面板（表单草稿也会重置）；其它 keep 不动
-			setManualTick((t) => ({ ...t, [side]: t[side] + 1 }));
+			setManualTick((t) => ({ ...t, left: t.left + 1 }));
 		};
+
 		return (
-			<aside
-				className={`side side-${side} ${open ? "" : "side-collapsed"}`}
+			<section
+				className={`workspace-section ${open ? "" : "workspace-section-hidden"}`}
+				hidden={!open}
 				aria-hidden={!open}
 			>
-				{/* 左抽屉的轨：品牌在顶、板块在中、设置在底（PLAN-FRONTEND-V2 §三） */}
-				{side === "left" && (
-					<nav className="drawer-rail" aria-label={t("板块")}>
-						<button
-							type="button"
-							className="drawer-rail-brand"
-							title={t("欢迎页")}
-							aria-label={t("打开欢迎页")}
-							onClick={() => {
-								if (welcome) listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-								else showWelcome();
-							}}
-						>
-							<BrandLogo className="brand-logo" size={26} />
-						</button>
-						<div className="drawer-rail-list">
-							{DRAWER_SECTIONS.map((sid) => {
-								const Ic = PANEL_ICON[sid];
-								return (
-									<button
-										key={sid}
-										type="button"
-										className={`drawer-rail-btn ${leftPanel === sid ? "active" : ""}`}
-										onClick={() => openLeft(sid)}
-										aria-label={panelLabel(sid)}
-										aria-current={leftPanel === sid}
-										data-tip={panelLabel(sid)}
-									>
-										<Ic size={19} />
-									</button>
-								);
-							})}
-						</div>
-						<button
-							type="button"
-							className="drawer-rail-btn drawer-rail-foot"
-							onClick={() => {
-								const next = dark ? "light" : "dark";
-								setTheme(next);
-								setDark(next === "dark");
-								pushToast("info", next === "dark" ? t("已切换到黑夜模式") : t("已切换到白昼模式"));
-							}}
-							aria-label={dark ? t("切换到白天") : t("切换到黑夜")}
-							aria-pressed={dark}
-							data-tip={dark ? t("白天") : t("黑夜")}
-							title={dark ? t("白天") : t("黑夜")}
-						>
-							{dark ? <IconSun size={19} /> : <IconMoon size={19} />}
-						</button>
-						<button
-							type="button"
-							className={`drawer-rail-btn drawer-rail-foot ${leftPanel === "settings" ? "active" : ""}`}
-							onClick={() => openLeft("settings")}
-							aria-label={t("设置")}
-							aria-current={leftPanel === "settings"}
-							data-tip={t("设置")}
-						>
-							<IconSettings size={19} />
-						</button>
-						<button
-							type="button"
-							className={`drawer-rail-btn drawer-rail-foot ${leftPanel === "about" ? "active" : ""}`}
-							onClick={() => openLeft("about")}
-							aria-label={t("关于")}
-							aria-current={leftPanel === "about"}
-							data-tip={t("关于")}
-						>
-							<IconInfo size={19} />
-						</button>
-					</nav>
-				)}
-								<div className="side-main">
-				{open && (
-					<div className="panel-head">
+				{open && !(headId === "roles" && studioOpen) && (
+					<div className="panel-head workspace-section-head">
 						{headId === "roles" ? (
 							<div className="panel-head-tabs" role="group" aria-label={t("角色视图")}>
 								<button
@@ -1932,28 +2260,21 @@ export default function App() {
 								<button
 									type="button"
 									className={`panel-head-tab ${rolesTab === "persona" ? "active" : ""}`}
-									onClick={() => setRolesTab("persona")}
+									onClick={() => {
+										setCardLoreOpen(false);
+										setRolesTab("persona");
+									}}
 								>
 									{t("用户角色")}
 								</button>
 							</div>
 						) : (
 							<span className="panel-head-title">
-								<HeadIcon size={15} />
+								<HeadIcon size={16} />
 								{agent ? agent.name : panelLabel(headId)}
 							</span>
 						)}
 						<span className="panel-head-actions">
-							{headId === "roles" && rolesTab === "card" && (
-								<button
-									className="icon-btn"
-									onClick={() => setStudioOpen(true)}
-									title={t("角色卡工坊")}
-									aria-label={t("打开角色卡工坊")}
-								>
-									<IconEdit size={15} />
-								</button>
-							)}
 							{refreshable && (
 								<button className="icon-btn" onClick={doRefresh} title={t("刷新")} aria-label={t("刷新面板")}>
 									<IconRefresh size={15} />
@@ -1961,56 +2282,70 @@ export default function App() {
 							)}
 							<button
 								className="icon-btn"
-								onClick={() => (side === "left" ? setLeftPanel(null) : setRightPanel(null))}
-								title={t("收起")}
-								aria-label={t("收起面板")}
+								onClick={() => {
+									setCenterLoreDetail(null);
+									setCenterDenylist(false);
+									openLeft(null);
+								}}
+								title={t("返回对话")}
+								aria-label={t("返回对话")}
 							>
 								<IconClose size={16} />
 							</button>
 						</span>
 					</div>
 				)}
-{ids.map((pid) => {
-					const isAgent = pid.startsWith("agent:");
-					const ag = isAgent ? agentPanels.find((p) => agentId(p.name) === pid) : undefined;
-					if (isAgent && !ag) return null;
-					const visible = open && pid === id;
-					const bodyKey =
-						visible && id
-							? `${pid}-${manualTick[side]}`
-							: pid; /* 非可见不要用 tick，避免刷新可见面板时误卸其它保活 */
-					return (
-						<div
-							key={pid}
-							className="side-panel-keep"
-							hidden={!visible}
-							aria-hidden={!visible}
-							/* 可见时参与 flex 占满高度（才能滚）；隐藏时 display:none 卸出布局 */
-							style={visible ? { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } : { display: "none" }}
-						>
-							{ag ? (
-								<ArtifactPanel
-									panel={ag}
-									data={worldState?.panelData?.[ag.name]}
-									onSaved={(p) => {
-										// 乐观更新；随后 WS panels 帧会再对齐
-										setAgentPanels((list) =>
-											list.map((x) =>
-												x.name === p.name
-													? { ...x, kind: p.kind as typeof x.kind, content: p.content, updatedAt: p.updatedAt }
-													: x,
-											),
-										);
-									}}
-								/>
-							) : (
-								<Fragment key={bodyKey}>{renderPanel(pid as PanelId)}</Fragment>
-							)}
-						</div>
-					);
-				})}
+				<div className="workspace-section-body">
+					{ids.map((pid) => {
+						const isAgent = pid.startsWith("agent:");
+						const ag = isAgent ? agentPanels.find((p) => agentId(p.name) === pid) : undefined;
+						if (isAgent && !ag) return null;
+						const visible = open && pid === id;
+						const bodyKey = visible && id ? `${pid}-${manualTick.left}` : pid;
+						return (
+							<div
+								key={pid}
+								className="side-panel-keep workspace-section-keep"
+								hidden={!visible}
+								aria-hidden={!visible}
+								style={visible ? { flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } : { display: "none" }}
+							>
+								{ag ? (
+									<ArtifactPanel
+										panel={ag}
+										data={worldState?.panelData?.[ag.name]}
+										onSaved={(p) => {
+											setAgentPanels((list) =>
+												list.map((x) =>
+													x.name === p.name
+														? { ...x, kind: p.kind as typeof x.kind, content: p.content, updatedAt: p.updatedAt }
+														: x,
+												),
+											);
+										}}
+									/>
+								) : (
+									<Fragment key={bodyKey}>{renderPanel(pid as PanelId)}</Fragment>
+								)}
+							</div>
+						);
+					})}
+					{open && centerLoreDetail && !mobileRef.current && (
+						<LoreDetailCenter
+							entry={centerLoreDetail.entry}
+							scopePath={centerLoreDetail.scopePath}
+							onClose={() => setCenterLoreDetail(null)}
+							toast={pushToast}
+						/>
+					)}
+					{open && centerDenylist && (
+						<BashDenylistCenter
+							onClose={() => setCenterDenylist(false)}
+							toast={pushToast}
+						/>
+					)}
 				</div>
-			</aside>
+			</section>
 		);
 	};
 
@@ -2033,10 +2368,8 @@ export default function App() {
 	const openPanelFromWelcome = (
 		id: "connect" | "card" | "powers" | "sessions" | "lorebook" | "preset" | "persona",
 	) => {
-		// 不关欢迎区：面板与欢迎同屏
 		if (id === "sessions") {
-			openRight("sessions");
-			// 见 togglePanel：保留旧列表、后台重拉，避免「读取中…」闪一下
+			setSidebarOpen(true);
 			ws.send({ type: "sessions" });
 			return;
 		}
@@ -2051,8 +2384,8 @@ export default function App() {
 	/** 顶栏主标题：当前会话与卡名 */
 	const currentSession = sessions?.find((s) => s.current);
 	const homeHasHistory = sessions !== null && sessions.some((s) => s.preview);
-	/** agent 子项目的分栏：主页与写卡平台打开时让位（写卡平台占同一块中间区域） */
-	const agentSplit = conversationMode === "agent" && !welcome && !studioOpen;
+	/** agent 子项目的分栏：主页时让位 */
+	const agentSplit = conversationMode === "agent" && !welcome;
 
 	// 手机：两页横滑切换。
 	// 双轨保障：原生 scroll-snap 滚动 + 触摸滑移手势识别。
@@ -2159,20 +2492,22 @@ export default function App() {
 	}, [agentSplit]);
 	/** 桌面分隔条：按住拖动改稿子占比；双击回到 60%。拖动期间给容器挂 dragging，让卡皮肤 iframe 不吃指针 */
 	const onSplitterDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-		const box = pagesRef.current;
+		const box = pagesRef.current?.parentElement ?? pagesRef.current;
 		if (!box) return;
 		e.preventDefault();
 		e.currentTarget.setPointerCapture(e.pointerId);
 		storyDragRef.current = true;
 		box.classList.add("agent-pages-dragging");
+		pagesRef.current?.classList.add("agent-pages-dragging");
 		const rect = box.getBoundingClientRect();
 		const move = (ev: PointerEvent) => {
 			if (!storyDragRef.current || rect.width === 0) return;
-			setStoryFrac(Math.min(0.85, Math.max(0.2, (ev.clientX - rect.left) / rect.width)));
+			setStoryFrac(Math.min(0.78, Math.max(0.28, (ev.clientX - rect.left) / rect.width)));
 		};
 		const up = () => {
 			storyDragRef.current = false;
 			box.classList.remove("agent-pages-dragging");
+			pagesRef.current?.classList.remove("agent-pages-dragging");
 			window.removeEventListener("pointermove", move);
 			window.removeEventListener("pointerup", up);
 			window.removeEventListener("pointercancel", up);
@@ -2181,6 +2516,19 @@ export default function App() {
 		window.addEventListener("pointerup", up);
 		window.addEventListener("pointercancel", up);
 	}, []);
+
+	const middleOpen = Boolean(leftPanel || centerChatAsset);
+	const showCardLoreSub = leftPanel === "roles" && rolesTab === "card" && !studioOpen && cardLoreOpen;
+	const showConnectSub = leftPanel === "connect" && connectEditorTarget !== null;
+	const showPresetSub = leftPanel === "preset" && presetEditorTarget !== null;
+	const middleSubOpen = showCardLoreSub || showConnectSub || showPresetSub;
+	const middleWide = Boolean(
+		centerChatAsset ||
+		(leftPanel === "roles" && studioOpen) ||
+		centerLoreDetail ||
+		centerDenylist ||
+		leftPanel?.startsWith("agent:"),
+	);
 
 	return (
 		<PanelRefreshContext.Provider value={agentTick}>
@@ -2235,21 +2583,27 @@ export default function App() {
 				/>
 			)}
 
-			{/* 左侧栏：在桌面为平级满高分栏（与主工作区同图层分立）；移动端为浮层抽屉 */}
-			{sidePanel(leftPanel, "left")}
+			{/* 左侧栏：上下分栏（上板块导航、下会话树），在桌面为平级满高分栏；移动端为半屏浮层抽屉 */}
+			{sidebarOpen && (
+				<div
+					className="wb-mobile-sidebar-backdrop"
+					onClick={() => setSidebarOpen(false)}
+				/>
+			)}
+			{leftSidebar()}
 
 			<div className="workspace">
 				<header className="topbar">
-				{/* 左一键：开合左抽屉（PLAN-FRONTEND-V2 §四） */}
+				{/* 左两键：开合左栏 + 新建 */}
 				<div className="tb-side tb-side-left">
 						<button
 							type="button"
-							className={`tb-btn ${leftPanel ? "active" : ""}`}
+							className={`tb-btn ${sidebarOpen ? "active" : ""}`}
 							onClick={toggleDrawer}
-							aria-label={t("板块")}
-							aria-expanded={!!leftPanel}
-							data-tip={t("板块")}
-							title={t("板块")}
+							aria-label={t("侧栏")}
+							aria-expanded={sidebarOpen}
+							data-tip={t("侧栏")}
+							title={t("收起 / 展开侧栏")}
 						>
 							<IconPanelLeft size={18} />
 						</button>
@@ -2289,6 +2643,7 @@ export default function App() {
 												className="tb-new-item"
 												onClick={() => {
 													setNewMenuOpen(false);
+													setLeftPanel(null);
 													// 当前项目里再开一个＝chat_new_session（项目行「＋」同通道）；
 													// 裸 new 在两层布局下是新建项目，别用。
 													const currentChatId = sessions?.find((s) => s.current)?.chatId;
@@ -2309,6 +2664,7 @@ export default function App() {
 								type="button"
 								className="tb-btn"
 								onClick={() => {
+									setLeftPanel(null);
 									ws.send({ type: "new" });
 									dismissWelcome();
 								}}
@@ -2322,8 +2678,7 @@ export default function App() {
 						)}
 					</div>
 				{/*
-				  * 中：会话名 + 一行状态。卡名（原右 gutter）、扮演/工作（原输入框上方那条）、
-				  * 忙闲与连接态（原右 gutter）三样合并到这里，右 gutter 整个退场。
+				  * 中：会话名 + 一行状态。
 				  */}
 				<div className="tb-title">
 					<span className="tb-title-main" title={currentSession?.name ? `${charName || t("新对话")} · ${currentSession.name}` : (charName || t("新对话"))}>
@@ -2331,25 +2686,11 @@ export default function App() {
 					</span>
 					<span className="tb-title-sub">
 						{conversationMode === "agent" ? (
-							<button type="button" className="tb-sub-mode tb-sub-mode-agent" title={t("agent 模式：正文是独立章节文件，这里的对话是讨论；手机上点它看正文")} onClick={() => setStoryTab("story")}>
-								agent<span className="tb-sub-mode-agent-story">{storyOutline?.length ? t("· 正文 {n} 章", { n: storyOutline.length }) : t("· 正文")}</span>
+							<button type="button" className="tb-sub-mode tb-sub-mode-agent" title={t("写作模式：正文是独立章节文件，这里的对话是讨论；手机上点它看正文")} onClick={() => { setLeftPanel(null); setStoryTab("story"); }}>
+								{t("写作模式")}<span className="tb-sub-mode-agent-story">{storyOutline?.length ? t("· 正文 {n} 章", { n: storyOutline.length }) : t("· 正文")}</span>
 							</button>
 						) : (
-						<div className="tb-sub-mode" role="radiogroup" aria-label={t("对话模式")} title={t("扮演：演剧情；工作：改卡、写前端/脚本、任何要动代码与文件的任务")}>
-							{(["roleplay", "authoring"] as const).map((m) => (
-								<button
-									key={m}
-									type="button"
-									role="radio"
-									aria-checked={conversationMode === m}
-									className={`tb-sub-mode-opt ${conversationMode === m ? "active" : ""}`}
-									disabled={busy || conn !== "open" || conversationMode === m}
-									onClick={() => ws.send({ type: "conversation_mode", mode: m })}
-								>
-									{m === "authoring" ? t("工作") : t("扮演")}
-								</button>
-							))}
-						</div>
+							<span className="tb-sub-mode-tag">{t("扮演模式")}</span>
 						)}
 						{(!coarse || busy || conn !== "open") && (
 							<>
@@ -2398,33 +2739,176 @@ export default function App() {
 						</div>
 					)}
 				</div>
-				{/* 右两键：新建 / 会话树 */}
+				{/* 右侧：当前用户角色（Persona）快速选择气泡 */}
 				<div className="tb-side tb-side-right">
+					<div className="tb-persona-wrap">
 						<button
 							type="button"
-							className={`tb-btn ${studioOpen ? "active" : ""}`}
-							onClick={toggleStudio}
-							aria-label={t("写卡平台")}
-							data-tip={t("写卡平台")}
-							title={t("写卡平台")}
+							className={`tb-persona-btn ${personaMenuOpen ? "active" : ""}`}
+							onClick={() => {
+								const next = !personaMenuOpen;
+								setPersonaMenuOpen(next);
+								if (next) {
+									apiGetCacheClear("/api/personas");
+									void apiGet<PersonasResponse>("/api/personas")
+										.then((pr) => setPersonaStore(pr))
+										.catch(() => {});
+								}
+							}}
+							aria-expanded={personaMenuOpen}
+							aria-label={userName ? t("用户角色：{name}", { name: userName }) : t("用户角色")}
+							title={userName ? t("用户角色：{name}（点击查看或切换）", { name: userName }) : t("用户角色（点击查看或切换）")}
 						>
-							<IconEdit size={18} />
+							{userAvatarUrl ? (
+								<img className="tb-persona-avatar" src={userAvatarUrl} alt="" />
+							) : (
+								<span className="tb-persona-fallback" aria-hidden="true">
+									<IconPersona size={15} />
+								</span>
+							)}
+							{userName && <span className="tb-persona-name">{userName}</span>}
 						</button>
-						<button
-							type="button"
-							className={`tb-btn ${rightPanel === "sessions" ? "active" : ""}`}
-							onClick={() => togglePanel("sessions")}
-							aria-label={t("会话树")}
-							data-tip={t("会话树")}
-							title={t("会话树")}
-						>
-							<IconSessions size={18} />
-						</button>
+						{personaMenuOpen && (
+							<>
+								<div className="tb-new-backdrop" onClick={() => setPersonaMenuOpen(false)} />
+								<div className="tb-persona-pop" role="menu" aria-label={t("切换用户角色")}>
+									<div className="tb-persona-pop-head">
+										<span>{t("切换用户角色")}</span>
+									</div>
+									<div className="tb-persona-pop-list">
+										{(personaStore?.personas ?? []).length === 0 ? (
+											<div className="tb-persona-pop-empty">{t("暂无用户角色")}</div>
+										) : (
+											(personaStore?.personas ?? []).map((p) => {
+												const isActive = p.id === personaStore?.activeId;
+												const isDefault = p.id === personaStore?.current;
+												const isLocked = p.id === personaStore?.lockedForCard;
+												return (
+													<button
+														key={p.id}
+														type="button"
+														role="menuitemradio"
+														aria-checked={isActive}
+														disabled={personaSwitching}
+														className={`tb-persona-pop-item ${isActive ? "on" : ""}`}
+														onClick={() => {
+															setPersonaSwitching(true);
+															setUserName(p.name);
+															setUserAvatarUrl(p.avatar ? personaAvatarUrl(p.id) : null);
+															setPersonaMenuOpen(false);
+															void apiPost("/api/personas/select", { id: p.id })
+																.then(async () => {
+																	apiGetCacheClear("/api/personas");
+																	const pr = await apiGet<PersonasResponse>("/api/personas");
+																	setPersonaStore(pr);
+																	bumpWatchPanels();
+																})
+																.catch((err) => {
+																	pushToast("error", err instanceof Error ? err.message : String(err));
+																})
+																.finally(() => setPersonaSwitching(false));
+														}}
+													>
+														{p.avatar ? (
+															<img className="tb-persona-pop-avatar" src={personaAvatarUrl(p.id)} alt="" />
+														) : (
+															<span className="tb-persona-pop-seal" aria-hidden="true">
+																{(p.name || "？").slice(0, 1)}
+															</span>
+														)}
+														<span className="tb-persona-pop-info">
+															<span className="tb-persona-pop-row">
+																<span className="tb-persona-pop-name">{p.name}</span>
+																{isLocked && <span className="tb-persona-pop-tag locked">{t("本卡锁定")}</span>}
+																{isDefault && !isLocked && <span className="tb-persona-pop-tag">{t("默认")}</span>}
+															</span>
+															{p.persona && (
+																<span className="tb-persona-pop-desc">
+																	{p.persona.replace(/\s+/g, " ").trim()}
+																</span>
+															)}
+														</span>
+														{isActive && <span className="tb-persona-pop-check">✓</span>}
+													</button>
+												);
+											})
+										)}
+									</div>
+									<div className="tb-persona-pop-foot">
+										<button
+											type="button"
+											className="tb-persona-pop-manage"
+											onClick={() => {
+												setPersonaMenuOpen(false);
+												setRolesTab("persona");
+												openLeft("roles");
+											}}
+										>
+											{t("管理用户角色…")}
+										</button>
+									</div>
+								</div>
+							</>
+						)}
 					</div>
+				</div>
 			</header>
 
-				<div className="layout">
-					{/* agent 模式：稿子在左、讨论在右。桌面是可拖比例的分栏（讨论可收起）；手机是横滑的两页（scroll-snap） */}
+				<div
+					className={`layout ${sidebarOpen ? "layout-sidebar-open" : ""} ${middleOpen ? "layout-middle-open" : ""} ${agentSplit ? "layout-agent-split" : ""} ${agentSplit && chatCollapsed ? "layout-chat-collapsed" : ""}`}
+					style={{ "--story-frac": storyFrac } as React.CSSProperties}
+				>
+					<div
+						className={`workspace-middle-slot ${middleOpen ? "workspace-middle-slot-open" : "workspace-middle-slot-hidden"} ${middleWide ? "workspace-middle-slot-wide" : "workspace-middle-slot-compact"} ${middleSubOpen ? "workspace-middle-slot-subopen" : ""} ${showConnectSub || showPresetSub ? "workspace-middle-slot-subwide" : ""}`}
+						hidden={!middleOpen}
+						aria-hidden={!middleOpen}
+					>
+						{workspaceSectionView()}
+						{showCardLoreSub && (
+							<CardLorePicker
+								toast={pushToast}
+								onClose={() => setCardLoreOpen(false)}
+							/>
+						)}
+						{showConnectSub && connectEditorTarget && (
+							<ConnectEditorPane
+								target={connectEditorTarget}
+								onClose={() => setConnectEditorTarget(null)}
+								toast={pushToast}
+							/>
+						)}
+						{showPresetSub && presetEditorTarget && (
+							<PresetEditorPane
+								target={presetEditorTarget}
+								onChangeTarget={setPresetEditorTarget}
+								onClose={() => setPresetEditorTarget(null)}
+								toast={pushToast}
+							/>
+						)}
+						{centerChatAsset && (
+							<ChatAssetCenter
+								asset={centerChatAsset}
+								onClose={() => setCenterChatAsset(null)}
+								onChanged={() => setChatAssetTick((n) => n + 1)}
+								onSelectAsset={(relPath) =>
+									setCenterChatAsset((prev) => (prev ? { ...prev, relPath } : null))
+								}
+								toast={pushToast}
+							/>
+						)}
+					</div>
+					{middleOpen && middleWide && !agentSplit && (
+						<div
+							className="agent-splitter middle-splitter"
+							role="separator"
+							aria-orientation="vertical"
+							aria-label={t("拖动调整正文与讨论的比例")}
+							title={t("拖动调整比例，双击恢复默认")}
+							onPointerDown={onSplitterDown}
+							onDoubleClick={() => setStoryFrac(0.6)}
+						/>
+					)}
+					{/* 写作模式：稿子在左、讨论在右。桌面是可拖比例的分栏（讨论可收起）；手机是横滑的两页（scroll-snap） */}
 					<div
 						ref={pagesRef}
 						className={`agent-pages ${agentSplit ? "agent-pages-on" : ""} ${agentSplit && chatCollapsed ? "agent-pages-chat-collapsed" : ""}`}
@@ -2470,10 +2954,10 @@ export default function App() {
 							onDoubleClick={() => setStoryFrac(0.6)}
 						/>
 					)}
-					<main className={`center ${welcome && sessions !== null && !homeHasHistory ? "center-home-empty" : ""} ${welcome && homeHasHistory ? "center-home-filled" : ""} ${studioOpen ? "center-studio-split" : ""} ${agentSplit ? "center-agent-split" : ""}`}>
+					<main className={`center ${welcome && sessions !== null && !homeHasHistory ? "center-home-empty" : ""} ${welcome && homeHasHistory ? "center-home-filled" : ""} ${middleOpen && !agentSplit ? "center-middle-split" : ""} ${agentSplit ? "center-agent-split" : ""}`}>
 					<div className={`stage-wrap ${rightPanel ? "split-active" : ""} ${agentSplit && rightPanel ? "agent-panel-cover" : ""}`}>
 					<div className="stage-col stage-col-left">
-						{(rightPanel || studioOpen || agentSplit) && (
+						{(rightPanel || agentSplit || middleOpen) && (
 							<div className="stage-col-head">
 								<span className="stage-col-title">
 									<IconCard size={14} />
@@ -2501,9 +2985,7 @@ export default function App() {
 									onOpen={openSessionFromWelcome}
 									onNew={newSessionFromWelcome}
 									onBrowseAll={() => {
-										dismissWelcome();
-										openRight("sessions");
-										// 保留旧列表、后台重拉（不清 null，避免闪「读取中…」）
+										setSidebarOpen(true);
 										ws.send({ type: "sessions" });
 									}}
 									onOpenPanel={openPanelFromWelcome}
@@ -2681,14 +3163,14 @@ export default function App() {
 								<div className="msg msg-char msg-live">
 									<div className="msg-head">
 										<MsgAvatar src={charAvatarUrl} name={charName} kind="char" />
-										<span className="msg-name msg-name-char">{streamMode === "authoring" ? t("工作") : streamMode === "agent" ? "agent" : charName}</span>
+										<span className="msg-name msg-name-char">{streamMode === "authoring" ? t("工作") : streamMode === "agent" ? t("写作") : charName}</span>
 										<span className="msg-live-tag">{t("生成中")}</span>
 									</div>
 									{liveSegs.length > 0 ? (
 										<TurnTimeline segments={liveSegs} skin={streamMode !== "roleplay" ? null : liveSkin} plain={streamMode !== "roleplay"} live />
 									) : (
 										<div className="info-line pulse" style={{ margin: "0.4rem 0 0" }}>
-											{`${streamMode === "authoring" ? t("工作") : streamMode === "agent" ? "agent" : charName} ${thinkingLive ? t("正在思考…") : t("工作中…")}`}
+											{`${streamMode === "authoring" ? t("工作") : streamMode === "agent" ? t("写作") : charName} ${thinkingLive ? t("正在思考…") : t("工作中…")}`}
 										</div>
 									)}
 									{toolNote && (
@@ -2757,31 +3239,7 @@ export default function App() {
 						const host = agentSplit ? pagesRef.current?.querySelector(".story-pane") : null;
 						return host ? createPortal(pane, host) : pane;
 					})()}
-						{centerLoreDetail && !mobileRef.current && (() => {
-							const detailNode = (
-								<LoreDetailCenter
-									entry={centerLoreDetail.entry}
-									scopePath={centerLoreDetail.scopePath}
-									onClose={() => setCenterLoreDetail(null)}
-									toast={pushToast}
-								/>
-							);
-							const host = agentSplit ? pagesRef.current?.querySelector(".story-pane") : null;
-							return host ? createPortal(detailNode, host) : detailNode;
-						})()}
 					</div>
-					{/* 命令黑名单（docs/PLAN-AGENT-BACK-TO-PI.md §二）：挂在「中间栏」整列上——
-					    settings 入口随时可开，主页空态时 .stage-wrap 会塌，挂在它里面会截断 */}
-					{centerDenylist && (() => {
-						const denylistNode = (
-							<BashDenylistCenter
-								onClose={() => setCenterDenylist(false)}
-								toast={pushToast}
-							/>
-						);
-						const host = agentSplit ? pagesRef.current?.querySelector(".story-pane") : null;
-						return host ? createPortal(denylistNode, host) : denylistNode;
-					})()}
 					<footer
 						className="composer"
 						onDragOver={(e) => {
@@ -2881,118 +3339,6 @@ export default function App() {
 									))}
 								</div>
 							)}
-							{/* 手机端：左侧三钮收进「＋」，展开为输入框上方一行；桌面端 CSS 隐藏此钮、工具常驻 */}
-							<button
-								type="button"
-								className={`dock-btn composer-more ${composerTools ? "active" : ""}`}
-								title={t("更多工具")}
-								aria-label={t("更多工具")}
-								aria-expanded={composerTools}
-								onClick={() => setComposerTools((v) => !v)}
-							>
-								<IconPlus size={18} />
-							</button>
-							<div className={`composer-tools ${composerTools ? "open" : ""}`}>
-								{conversationMode === "agent" ? (
-									<>
-										<button
-											type="button"
-											className="dock-btn"
-											title={t("为当前正文与讨论保存一个检查点快照")}
-											aria-label={t("保存检查点")}
-											onClick={() => {
-												saveAgentCheckpoint();
-												setComposerTools(false);
-											}}
-										>
-											<IconPin size={18} />
-											<span className="composer-tool-label">{t("存档")}</span>
-										</button>
-										<button
-											type="button"
-											className="dock-btn"
-											title={t("文件和讨论一起回退到上一轮输入之前")}
-											aria-label={t("回退本轮")}
-											onClick={() => {
-												rewindAgentTurn();
-												setComposerTools(false);
-											}}
-										>
-											<IconUndo size={18} />
-											<span className="composer-tool-label">{t("回退")}</span>
-										</button>
-										<button
-											type="button"
-											className="dock-btn"
-											title={t("上传图片/文件（也可拖入或粘贴）")}
-											aria-label={t("上传图片或文件")}
-											onClick={() => {
-												uploadInputRef.current?.click();
-												setComposerTools(false);
-											}}
-										>
-											<IconAttach size={18} />
-											<span className="composer-tool-label">{t("上传")}</span>
-										</button>
-									</>
-								) : (
-									<>
-										{/* 会话已上移到顶栏右键（会话树），此处不再重复 */}
-										<button
-											type="button"
-											className={`dock-btn ${rightPanel === "worldline" ? "active" : ""}`}
-											title={t("世界线")}
-											aria-label={t("世界线")}
-											onClick={() => {
-												toggleRight("worldline");
-												setComposerTools(false);
-											}}
-										>
-											<IconWorldline size={18} />
-											<span className="composer-tool-label">{t("世界线")}</span>
-										</button>
-										<button
-											type="button"
-											className={`dock-btn ${rightPanel === "roster" ? "active" : ""}`}
-											title={t("登场名录")}
-											aria-label={t("登场名录")}
-											onClick={() => {
-												toggleRight("roster");
-												setComposerTools(false);
-											}}
-										>
-											<IconRoster size={18} />
-											<span className="composer-tool-label">{t("名录")}</span>
-										</button>
-										<button
-											type="button"
-											className="dock-btn"
-											title={t("加一行备注：只影响下一拍演出或重 roll，不进入剧情历史")}
-											aria-label={t("加一行备注")}
-											onClick={() => {
-												setNoteRows((rs) => [...rs, ""]);
-												setComposerTools(false);
-											}}
-										>
-											<IconPencil size={18} />
-											<span className="composer-tool-label">{t("备注")}</span>
-										</button>
-										<button
-											type="button"
-											className="dock-btn"
-											title={t("上传图片/文件（也可拖入或粘贴）")}
-											aria-label={t("上传图片或文件")}
-											onClick={() => {
-												uploadInputRef.current?.click();
-												setComposerTools(false);
-											}}
-										>
-											<IconAttach size={18} />
-											<span className="composer-tool-label">{t("上传")}</span>
-										</button>
-									</>
-								)}
-							</div>
 							<input
 								ref={uploadInputRef}
 								type="file"
@@ -3007,7 +3353,7 @@ export default function App() {
 								ref={inputRef}
 								value={input}
 								placeholder={conn === "open" ? (conversationMode === "authoring" ? t("描述要做的事：改卡、写前端或脚本、整理文件…") : conversationMode === "agent" ? t("讨论剧情、下达写作指令；正文由 agent 写入文件…") : userName ? t("以「{name}」的身份发言…", { name: userName }) : t("输入消息…")) : t("等待连接…")}
-								rows={1}
+								rows={2}
 								onFocus={() => {
 									setComposerTools(false);
 									setTimeout(() => inputRef.current?.scrollIntoView({ block: "nearest" }), 250);
@@ -3060,57 +3406,193 @@ export default function App() {
 									}
 								}}
 							/>
-							{busy ? (
+							<div className="composer-bar">
+								{/* 手机端：左侧三钮收进「＋」，展开为输入框上方一行；桌面端 CSS 隐藏此钮、工具常驻 */}
 								<button
-									className="btn btn-stop"
-									onClick={() => {
-										// 强制停止：本地立刻解锁输入，冻结流式，不等待服务端确认。
-										// abortingRef 保持到下一次 agent:start，防止服务端乐观 end 后迟到 delta 复活。
-										abortingRef.current = true;
-										setBusy(false);
-										setThinkingLive(false);
-										setToolNote(null);
-										// 无条件留痕：刚开拍就停（无正文无思考）也不许消息凭空消失（8/05）。
-										// 正文没有时给占位——有思考引用思考，都没有明示「已停止」。
-										const text = streamRef.current;
-										const thinking = streamThinkingRef.current.trim();
-										const acts = turnActsRef.current;
-										const segs = turnSegsRef.current;
-										resetActs();
-										resetSegs();
-										clearStream();
-										const leftover: ChatMsg = {
-											channel: streamModeRef.current !== "roleplay" ? "authoring" : "narrative",
-											...(streamModeRef.current !== "roleplay" ? { mode: streamModeRef.current } : {}),
-											text: text.trim()
-												? text
-												: thinking
-													? t("（正文未流出，见思维链）")
-													: t("（已停止）"),
-											...(thinking ? { thinking } : {}),
-											...(acts.length ? { activities: acts } : {}),
-											...(segs.length ? { segments: segs } : {}),
-											unfinished: true,
-										};
-										setMessages((ms) => upsertTurnReply(ms, leftover));
-										ws.send({ type: "abort" });
-									}}
-									title={t("停止")}
-									aria-label={t("停止生成")}
+									type="button"
+									className={`dock-btn composer-more ${composerTools ? "active" : ""}`}
+									title={t("更多工具")}
+									aria-label={t("更多工具")}
+									aria-expanded={composerTools}
+									onClick={() => setComposerTools((v) => !v)}
 								>
-									<IconStop size={18} />
+									<IconPlus size={18} />
 								</button>
-							) : (
-								<button
-									className="btn btn-send"
-									onClick={send}
-									disabled={(!input.trim() && pending.length === 0) || conn !== "open"}
-									title={t("发送")}
-									aria-label={t("发送")}
-								>
-									<IconSend size={17} />
-								</button>
-							)}
+								{composerTools && (
+										<div
+											className="composer-tools-backdrop"
+											onClick={() => setComposerTools(false)}
+										/>
+									)}
+									<div className={`composer-tools ${composerTools ? "open" : ""}`}>
+									{conversationMode === "agent" ? (
+										<>
+											<button
+												type="button"
+												className="dock-btn"
+												title={t("为当前正文与讨论保存一个检查点快照")}
+												aria-label={t("保存检查点")}
+												onClick={() => {
+													saveAgentCheckpoint();
+													setComposerTools(false);
+												}}
+											>
+												<IconPin size={18} />
+												<span className="composer-tool-label">{t("存档")}</span>
+											</button>
+											<button
+												type="button"
+												className="dock-btn"
+												title={t("文件和讨论一起回退到上一轮输入之前")}
+												aria-label={t("回退本轮")}
+												onClick={() => {
+													rewindAgentTurn();
+													setComposerTools(false);
+												}}
+											>
+												<IconUndo size={18} />
+												<span className="composer-tool-label">{t("回退")}</span>
+											</button>
+											<button
+												type="button"
+												className="dock-btn"
+												title={t("上传图片/文件（也可拖入或粘贴）")}
+												aria-label={t("上传图片或文件")}
+												onClick={() => {
+													uploadInputRef.current?.click();
+													setComposerTools(false);
+												}}
+											>
+												<IconAttach size={18} />
+												<span className="composer-tool-label">{t("上传")}</span>
+											</button>
+										</>
+									) : (
+										<>
+											<button
+												type="button"
+												className={`dock-btn ${rightPanel === "status" ? "active" : ""}`}
+												title={t("状态栏")}
+												aria-label={t("状态栏")}
+												onClick={() => {
+													toggleRight("status");
+													setComposerTools(false);
+												}}
+											>
+												<IconStatus size={18} />
+												<span className="composer-tool-label">{t("状态栏")}</span>
+											</button>
+											<button
+												type="button"
+												className={`dock-btn ${rightPanel === "worldline" ? "active" : ""}`}
+												title={t("世界线")}
+												aria-label={t("世界线")}
+												onClick={() => {
+													toggleRight("worldline");
+													setComposerTools(false);
+												}}
+											>
+												<IconWorldline size={18} />
+												<span className="composer-tool-label">{t("世界线")}</span>
+											</button>
+											<button
+												type="button"
+												className={`dock-btn ${rightPanel === "roster" ? "active" : ""}`}
+												title={t("登场名录")}
+												aria-label={t("登场名录")}
+												onClick={() => {
+													toggleRight("roster");
+													setComposerTools(false);
+												}}
+											>
+												<IconRoster size={18} />
+												<span className="composer-tool-label">{t("名录")}</span>
+											</button>
+											<button
+												type="button"
+												className="dock-btn"
+												title={t("加一行备注：只影响下一拍演出或重 roll，不进入剧情历史")}
+												aria-label={t("加一行备注")}
+												onClick={() => {
+													setNoteRows((rs) => [...rs, ""]);
+													setComposerTools(false);
+												}}
+											>
+												<IconPencil size={18} />
+												<span className="composer-tool-label">{t("备注")}</span>
+											</button>
+											<button
+												type="button"
+												className="dock-btn"
+												title={t("上传图片/文件（也可拖入或粘贴）")}
+												aria-label={t("上传图片或文件")}
+												onClick={() => {
+													uploadInputRef.current?.click();
+													setComposerTools(false);
+												}}
+											>
+												<IconAttach size={18} />
+												<span className="composer-tool-label">{t("上传")}</span>
+											</button>
+										</>
+									)}
+								</div>
+								<ComposerModelSwitch
+									toast={pushToast}
+									onOpenConnect={() => openLeft("connect")}
+								/>
+								{busy ? (
+									<button
+										className="btn btn-stop"
+										onClick={() => {
+											// 强制停止：本地立刻解锁输入，冻结流式，不等待服务端确认。
+											// abortingRef 保持到下一次 agent:start，防止服务端乐观 end 后迟到 delta 复活。
+											abortingRef.current = true;
+											setBusy(false);
+											setThinkingLive(false);
+											setToolNote(null);
+											// 无条件留痕：刚开拍就停（无正文无思考）也不许消息凭空消失（8/05）。
+											// 正文没有时给占位——有思考引用思考，都没有明示「已停止」。
+											const text = streamRef.current;
+											const thinking = streamThinkingRef.current.trim();
+											const acts = turnActsRef.current;
+											const segs = turnSegsRef.current;
+											resetActs();
+											resetSegs();
+											clearStream();
+											const leftover: ChatMsg = {
+												channel: streamModeRef.current !== "roleplay" ? "authoring" : "narrative",
+												...(streamModeRef.current !== "roleplay" ? { mode: streamModeRef.current } : {}),
+												text: text.trim()
+													? text
+													: thinking
+														? t("（正文未流出，见思维链）")
+														: t("（已停止）"),
+												...(thinking ? { thinking } : {}),
+												...(acts.length ? { activities: acts } : {}),
+												...(segs.length ? { segments: segs } : {}),
+												unfinished: true,
+											};
+											setMessages((ms) => upsertTurnReply(ms, leftover));
+											ws.send({ type: "abort" });
+										}}
+										title={t("停止")}
+										aria-label={t("停止生成")}
+									>
+										<IconStop size={18} />
+									</button>
+								) : (
+									<button
+										className="btn btn-send"
+										onClick={send}
+										disabled={(!input.trim() && pending.length === 0) || conn !== "open"}
+										title={t("发送")}
+										aria-label={t("发送")}
+									>
+										<IconSend size={17} />
+									</button>
+								)}
+							</div>
 						</div>
 						{/* 会话用量：输入框下方，右缘与输入框齐平 */}
 						{!welcome && (
@@ -3133,15 +3615,464 @@ export default function App() {
 						<span>{t("讨论")}</span>
 					</button>
 				)}
-				{studioOpen && (
-					<aside className="studio-split-pane" aria-label={t("写卡平台")}>
-						<CardStudio
-							onClose={() => setStudioOpen(false)}
-							onApplied={() => { apiGetCacheClear("/api/card"); void refreshCardFront(); }}
-						/>
-					</aside>
-				)}
 			</div>
+			{/* 手机端底部四格导航栏（对话界面是主界面不占按钮；再次点击当前按钮或点 ✕ 自然回到对话） */}
+			{mobileMoreOpen && (
+				<>
+					<div className="wb-mobile-more-backdrop" onClick={() => setMobileMoreOpen(false)} />
+					<div className="wb-mobile-more-sheet" role="menu" aria-label={t("更多")}>
+						{MOBILE_MORE_TABS.map((sid) => {
+							const Ic = PANEL_ICON[sid];
+							const active = leftPanel === sid && !sidebarOpen;
+							return (
+								<button
+									key={sid}
+									type="button"
+									role="menuitem"
+									className={`wb-mobile-more-item ${active ? "active" : ""}`}
+									onClick={() => {
+										setMobileMoreOpen(false);
+										setSidebarOpen(false);
+										openLeft(leftPanel === sid ? null : sid);
+									}}
+								>
+									<span className="wb-mobile-more-item-icon">
+										<Ic size={18} />
+									</span>
+									<span className="wb-mobile-more-item-label">{panelLabel(sid)}</span>
+								</button>
+							);
+						})}
+					</div>
+				</>
+			)}
+			<nav className="wb-mobile-tabbar" aria-label={t("板块")}>
+				{MOBILE_PRIMARY_TABS.map((sid) => {
+					const Ic = PANEL_ICON[sid];
+					const active = leftPanel === sid && !sidebarOpen;
+					return (
+						<button
+							key={sid}
+							type="button"
+							className={`wb-mobile-tab ${active ? "active" : ""}`}
+							aria-current={active}
+							onClick={() => {
+								setMobileMoreOpen(false);
+								setSidebarOpen(false);
+								openLeft(leftPanel === sid ? null : sid);
+							}}
+						>
+							<span className="wb-mobile-tab-icon">
+								<Ic size={19} />
+							</span>
+							<span className="wb-mobile-tab-label">{panelLabel(sid)}</span>
+						</button>
+					);
+				})}
+				{(() => {
+					const activeMoreId =
+						leftPanel != null && MOBILE_MORE_TABS.includes(leftPanel as PanelId)
+							? (leftPanel as PanelId)
+							: null;
+					const ActiveMoreIcon = activeMoreId ? PANEL_ICON[activeMoreId] : IconMore;
+					const moreActive = (activeMoreId !== null || mobileMoreOpen) && !sidebarOpen;
+					return (
+						<button
+							type="button"
+							className={`wb-mobile-tab ${moreActive ? "active" : ""}`}
+							aria-expanded={mobileMoreOpen}
+							onClick={() => {
+								setSidebarOpen(false);
+								if (activeMoreId) {
+									openLeft(null);
+									setMobileMoreOpen(false);
+								} else {
+									setMobileMoreOpen((v) => !v);
+								}
+							}}
+						>
+							<span className="wb-mobile-tab-icon">
+								<ActiveMoreIcon size={19} />
+							</span>
+							<span className="wb-mobile-tab-label">
+								{activeMoreId ? panelLabel(activeMoreId) : t("更多")}
+							</span>
+						</button>
+					);
+				})()}
+			</nav>
+			{/* 右下角副编剧 Bot 入口与伴随抽屉（仅扮演模式显示，写作模式无副编剧） */}
+			{!agentSplit && botOpen && (
+				<aside className="bot-drawer" aria-label={t("副编剧 Bot")}>
+					<header className="bot-drawer-head">
+						<div className="bot-drawer-title">
+							<span className={`bot-drawer-dot ${botStreaming ? "live" : ""}`} />
+							<IconBot size={16} />
+							<span className="bot-drawer-name">{t("副编剧")}</span>
+							<span className="bot-drawer-sub">
+								{botStreaming ? t("思考中…") : t("幕后伴随 · 不进正史")}
+							</span>
+						</div>
+						<div className="bot-drawer-actions">
+							<button
+								type="button"
+								className={`bot-head-btn ${botSettingsOpen ? "active" : ""}`}
+								onClick={() => void openBotSettings()}
+								title={t("副编剧设置")}
+							>
+								<IconSettings size={13} />
+								<span>{t("设置")}</span>
+							</button>
+							<button
+								type="button"
+								className="bot-head-close"
+								onClick={() => {
+									setBotOpen(false);
+									setBotSettingsOpen(false);
+								}}
+								title={t("收起副编剧")}
+								aria-label={t("收起副编剧")}
+							>
+								<IconClose size={15} />
+							</button>
+						</div>
+					</header>
+
+					<BotSessionControls snapshot={botSession} disabled={botStreaming || busy || conn !== "open"} send={request => ws.send({ type: "bot_manage", request })} />
+					{botSettingsOpen ? (
+						<div className="bot-settings-pane">
+							<div className="bot-settings-body">
+								<div className="bot-field">
+									<div className="bot-field-head">
+										<span className="bot-field-label">{t("性格生效范围")}</span>
+										<div className="bot-seg-group">
+											<button
+												type="button"
+												className={`bot-seg-btn ${botSettingsScope === "global" ? "active" : ""}`}
+												onClick={() => setBotSettingsScope("global")}
+											>
+												{t("全局默认")}
+											</button>
+											<button
+												type="button"
+												className={`bot-seg-btn ${botSettingsScope === "card" ? "active" : ""}`}
+												onClick={() => setBotSettingsScope("card")}
+											>
+												{t("仅当前角色卡")}
+											</button>
+										</div>
+									</div>
+								</div>
+
+								<div className="bot-field">
+									<span className="bot-field-label">{t("预设性格模板")}</span>
+									<div className="bot-preset-chips">
+										{botPresets.map((p) => {
+											const curVal = (botSettingsScope === "card" ? botCardPersona : botGlobalPersona).trim();
+											const isMatched = curVal === p.content.trim();
+											return (
+												<button
+													key={p.id}
+													type="button"
+													className={`bot-preset-chip ${isMatched ? "active" : ""}`}
+													title={p.tagline}
+													onClick={() => {
+														if (botSettingsScope === "card") setBotCardPersona(p.content);
+														else setBotGlobalPersona(p.content);
+													}}
+												>
+													{t(p.name)}
+												</button>
+											);
+										})}
+									</div>
+								</div>
+
+								<div className="bot-field">
+									<span className="bot-field-label">{t("性格与说话口吻")}</span>
+									<span className="bot-field-hint">
+										{t("只需写它的性格、脾气与对你的称呼；纯聊天体规范与幕后工具纪律已内置生效。")}
+									</span>
+									<textarea
+										className="bot-persona-textarea"
+										rows={6}
+										value={botSettingsScope === "card" ? botCardPersona : botGlobalPersona}
+										placeholder={
+											botSettingsScope === "card"
+												? t("留空则跟随全局默认性格…")
+												: t("描述副编剧的性格与说话风格…")
+										}
+										onChange={(e) => {
+											if (botSettingsScope === "card") setBotCardPersona(e.target.value);
+											else setBotGlobalPersona(e.target.value);
+										}}
+									/>
+								</div>
+
+								<div className="bot-field">
+									<div className="bot-field-head">
+										<span className="bot-field-label">{t("剧情视野范围")}</span>
+										<div className="bot-seg-group">
+											<button
+												type="button"
+												className={`bot-seg-btn ${botViewBeats === 0 ? "active" : ""}`}
+												onClick={() => setBotViewBeats(0)}
+											>
+												{t("跟随主模型视角")}
+											</button>
+											<button
+												type="button"
+												className={`bot-seg-btn ${botViewBeats > 0 ? "active" : ""}`}
+												onClick={() => setBotViewBeats(botViewBeats > 0 ? botViewBeats : 8)}
+											>
+												{t("指定最近拍数")}
+											</button>
+										</div>
+									</div>
+									<span className="bot-field-hint">
+										{botViewBeats === 0
+											? t("与台前主模型完全一致（携带前情提要、世界状态与当前未压缩的全部剧情）。")
+											: t("仅自动携带最近 N 拍剧情以节省上下文，更早的剧情由副编剧按需调工具查阅。")}
+									</span>
+									{botViewBeats > 0 && (
+										<div className="bot-beats-row">
+											<span>{t("最近")}</span>
+											<input
+												type="number"
+												className="bot-beats-input"
+												min={1}
+												max={50}
+												value={botViewBeats}
+												onChange={(e) => setBotViewBeats(Math.max(1, Math.min(50, Math.floor(Number(e.target.value) || 1))))}
+											/>
+											<span>{t("拍")}</span>
+										</div>
+									)}
+								</div>
+							</div>
+
+							<footer className="bot-settings-foot">
+								<button
+									type="button"
+									className="bot-head-btn"
+									onClick={() => setBotSettingsOpen(false)}
+								>
+									{t("取消")}
+								</button>
+								<button
+									type="button"
+									className="bot-save-btn"
+									disabled={botSavingSettings}
+									onClick={() => void saveBotSettings()}
+								>
+									{botSavingSettings ? t("保存中…") : t("保存设置")}
+								</button>
+							</footer>
+						</div>
+					) : (
+						<>
+							<div ref={botScrollRef} className="bot-drawer-body">
+								{botMessages.length === 0 && !botStreaming ? (
+									<div className="bot-empty">
+										<div className="bot-empty-title">{t("随时唤我聊戏、查设定、记笔记")}</div>
+										<div className="bot-empty-desc">
+											{t("我与台前主模型共享当前剧目视野，也能帮你读写世界书和项目记忆，所有对话完全独立、绝不污染台前正文。")}
+										</div>
+								<div className="bot-quick-grid">
+									<button
+										type="button"
+										className="bot-quick-card"
+										onClick={() => sendBot(t("点评一下刚才最新这一拍的节奏和人物反应，有什么出彩或生硬的地方？"))}
+									>
+										<span className="bot-quick-card-title">{t("锐评刚才这拍")}</span>
+										<span className="bot-quick-card-sub">{t("看看节奏、人设与张力")}</span>
+									</button>
+									<button
+										type="button"
+										className="bot-quick-card"
+										onClick={() => sendBot(t("结合当前剧情和世界状态，帮我推演接下来 2~3 个有意思的剧情走向。"))}
+									>
+										<span className="bot-quick-card-title">{t("推演后续走向")}</span>
+										<span className="bot-quick-card-sub">{t("给几个不同方向的脑洞")}</span>
+									</button>
+									<button
+										type="button"
+										className="bot-quick-card"
+										onClick={() => sendBot(t("看看最近几拍有没有新出现的设定、人物或地点值得写进世界书？帮我整理并写入。"))}
+									>
+										<span className="bot-quick-card-title">{t("提取新设定入世界书")}</span>
+										<span className="bot-quick-card-sub">{t("沉淀设定供台前检索")}</span>
+									</button>
+									<button
+										type="button"
+										className="bot-quick-card"
+										onClick={() => sendBot(t("帮我把目前的重要剧情进展和伏笔整理进本项目的记忆文档里。"))}
+									>
+										<span className="bot-quick-card-title">{t("整理本局记忆")}</span>
+										<span className="bot-quick-card-sub">{t("写入项目 记忆/*.md")}</span>
+									</button>
+								</div>
+							</div>
+						) : (
+							<div className="bot-msg-list">
+								{botMessages.map((m, idx) => (
+									<div
+										key={`${m.ts ?? idx}-${idx}`}
+										className={`bot-msg ${m.role === "user" ? "bot-msg-user" : "bot-msg-assistant"}`}
+									>
+										{m.role === "assistant" && m.tools && m.tools.length > 0 && (
+											<div className="bot-tool-chips">
+												{m.tools.map((tc, ti) => (
+													<span
+														key={ti}
+														className={`bot-tool-chip ${tc.isError ? "err" : ""}`}
+														title={tc.detail || tc.name}
+													>
+														<span className="bot-tool-chip-name">{toolLabel(tc.name)}</span>
+														{tc.detail && <span className="bot-tool-chip-detail">{tc.detail}</span>}
+													</span>
+												))}
+											</div>
+										)}
+										<div className="bot-msg-content artifact-md">
+											{m.role === "assistant" ? renderMarkdown(m.text) : m.text}
+										</div>
+										{m.role === "assistant" && (
+											<div className="bot-msg-foot">
+												<button
+													type="button"
+													className="bot-note-btn"
+													onClick={() => applyBotToNote(m.text)}
+													title={t("将这条建议填入台前输入框的「备注」栏，指导下一拍演出")}
+												>
+													<IconPencil size={11} />
+													<span>{t("填入备注")}</span>
+												</button>
+											</div>
+										)}
+									</div>
+								))}
+								{botStreaming && (
+									<div className="bot-msg bot-msg-assistant bot-msg-live">
+										{botLiveTools.length > 0 && (
+											<div className="bot-tool-chips">
+												{botLiveTools.map((tc, ti) => (
+													<span
+														key={ti}
+														className={`bot-tool-chip ${tc.isError ? "err" : ""}`}
+													>
+														<span className="bot-tool-chip-name">{toolLabel(tc.name)}</span>
+														{tc.detail && <span className="bot-tool-chip-detail">{tc.detail}</span>}
+													</span>
+												))}
+											</div>
+										)}
+										{botStreamThinking && !botStreamText && (
+											<div className="bot-thinking">{t("正在思考与查阅资料…")}</div>
+										)}
+										{botStreamText ? (
+											<div className="bot-msg-content artifact-md">{renderMarkdown(botStreamText)}</div>
+										) : (
+											!botStreamThinking && <div className="bot-thinking">{t("副编剧正在回应…")}</div>
+										)}
+									</div>
+								)}
+							</div>
+						)}
+					</div>
+
+					<footer className="bot-drawer-foot">
+						{botMessages.length > 0 && (
+							<div className="bot-quick-pills">
+								<button
+									type="button"
+									className="bot-quick-pill"
+									disabled={botStreaming || busy}
+									onClick={() => sendBot(t("点评一下刚才最新这一拍的节奏和人物反应，有什么出彩或生硬的地方？"))}
+								>
+									{t("锐评这拍")}
+								</button>
+								<button
+									type="button"
+									className="bot-quick-pill"
+									disabled={botStreaming || busy}
+									onClick={() => sendBot(t("结合当前剧情和世界状态，帮我推演接下来 2~3 个有意思的剧情走向。"))}
+								>
+									{t("推演走向")}
+								</button>
+								<button
+									type="button"
+									className="bot-quick-pill"
+									disabled={botStreaming || busy}
+									onClick={() => sendBot(t("看看最近几拍有没有新出现的设定、人物或地点值得写进世界书？帮我整理并写入。"))}
+								>
+									{t("提取设定")}
+								</button>
+								<button
+									type="button"
+									className="bot-quick-pill"
+									disabled={botStreaming || busy}
+									onClick={() => sendBot(t("帮我把目前的重要剧情进展和伏笔整理进本项目的记忆文档里。"))}
+								>
+									{t("整理记忆")}
+								</button>
+							</div>
+						)}
+						<div className="bot-input-row">
+							<textarea
+								className="bot-input"
+								rows={2}
+								value={botInput}
+								placeholder={t("问剧情、聊走向、查设定、记笔记…（Enter 发送）")}
+								onChange={(e) => setBotInput(e.target.value)}
+								onKeyDown={(e) => {
+									if (!coarse && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+										e.preventDefault();
+										sendBot();
+									}
+								}}
+							/>
+							{botStreaming ? (
+								<button
+									type="button"
+									className="bot-send-btn stop"
+									onClick={() => ws.send({ type: "bot_manage", request: { action: "stop" } })}
+									title={t("停止")}
+								>
+									<IconStop size={15} />
+								</button>
+							) : (
+								<button
+									type="button"
+									className="bot-send-btn"
+									disabled={!botInput.trim() || busy || conn !== "open"}
+									onClick={() => sendBot()}
+									title={t("发送给副编剧")}
+								>
+									<IconSend size={15} />
+								</button>
+							)}
+						</div>
+					</footer>
+						</>
+					)}
+				</aside>
+			)}
+			{!agentSplit && (
+				<button
+					type="button"
+					className={`bot-fab ${botOpen ? "active" : ""} ${botStreaming ? "streaming" : ""}`}
+					title={t("副编剧 Bot")}
+					aria-label={t("副编剧 Bot")}
+					aria-expanded={botOpen}
+					onClick={() => setBotOpen((v) => !v)}
+				>
+					<IconBot size={20} />
+					{botMessages.length > 0 && !botOpen && (
+						<span className="bot-fab-badge">{Math.ceil(botMessages.length / 2)}</span>
+					)}
+				</button>
+			)}
 			</div>
 			<PreviewRunner request={previewRequest} onClose={() => setPreviewRequest(null)} />
 			{floatPanel &&

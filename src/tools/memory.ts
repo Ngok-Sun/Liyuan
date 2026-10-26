@@ -75,7 +75,7 @@ export interface MemoryDeps {
 }
 
 /** 两个内置库的对外名字（服务层 id → 模型可读标签） */
-const STORE_LABEL: Record<string, string> = { narrative: "剧情库", external: "额外库", card: "卡级记忆" };
+const STORE_LABEL: Record<string, string> = { narrative: "剧情库", external: "额外库", card: "项目记忆", chat: "项目记忆" };
 
 /** 列举默认/最大条数：目录太长会挤爆上下文，且模型只是要个纵览 */
 const LIST_LIMIT = 20;
@@ -256,8 +256,8 @@ export const memoryList: ToolSpec<MemoryDeps> = {
 		properties: {
 			store: {
 				type: "string",
-					enum: ["external", "narrative", "card"],
-				description: "external＝手动录入与导入的资料（缺省）；narrative＝自动生成的剧情摘要与早期归档",
+				enum: ["external", "narrative", "card", "chat"],
+				description: "chat/card＝当前项目的 Markdown 记忆文档（记忆/*.md 与局部守则）；external＝手动录入与导入的资料（缺省）；narrative＝自动生成的剧情摘要与早期归档",
 			},
 			keyword: { type: "string", description: "只列正文或标题含此字样的条目（缺省列全部）" },
 			limit: { type: "number", description: `最多列几条（默认 ${LIST_LIMIT}，上限 ${LIST_MAX}）` },
@@ -267,7 +267,7 @@ export const memoryList: ToolSpec<MemoryDeps> = {
 	async run(args, deps): Promise<ToolResult> {
 		if (!deps.listMemory) return { text: "本环境不支持列举记忆条目。" };
 
-		const store = ["narrative", "card"].includes(strArg(args, "store")) ? strArg(args, "store") : "external";
+		const store = ["narrative", "card", "chat"].includes(strArg(args, "store")) ? (strArg(args, "store") === "chat" ? "card" : strArg(args, "store")) : "external";
 		const label = STORE_LABEL[store] ?? store;
 
 		let all: MemoryChunkLike[];
@@ -338,7 +338,7 @@ export const memoryDelete: ToolSpec<MemoryDeps> = {
 			version: { type: "string", description: "删除卡级文档必填，取自 memory_read。" },
 			store: {
 				type: "string",
-				enum: ["external", "narrative", "card"],
+				enum: ["external", "narrative", "card", "chat"],
 				description: "该条目所在的库（与 memory_list 时用的一致；缺省 external）",
 			},
 		},
@@ -361,7 +361,7 @@ export const memoryDelete: ToolSpec<MemoryDeps> = {
 			if (!verdict.allow) return { text: verdict.reason, activity: "删记忆 · 门禁拦下" };
 		}
 
-		const store = ["narrative", "card"].includes(strArg(args, "store")) ? strArg(args, "store") : "external";
+		const store = ["narrative", "card", "chat"].includes(strArg(args, "store")) ? (strArg(args, "store") === "chat" ? "card" : strArg(args, "store")) : "external";
 		const label = STORE_LABEL[store] ?? store;
 		let ok: boolean;
 		try {
@@ -401,17 +401,17 @@ export const memoryRead: ToolSpec<MemoryDeps> = {
 };
 
 export const memoryUpdate: ToolSpec<MemoryDeps> = {
-	name: "memory_update", domain: "memory", mode: "write", surfaces: ["stage", "assistant"], label: "更正卡级记忆",
-	description: () => "用户明确要求更正记忆时，按 ref 与版本替换当前卡的 Markdown 记忆原文。修改源复盘会使旧汇总失效；手工修改汇总后暂停自动覆盖，并隐藏已被它取代的旧来源。回执说明影响，相关来源由 memory_read 提供。",
-	parameters: () => ({ type: "object", properties: { ref: { type: "string" }, version: { type: "string" }, content: { type: "string" } }, required: ["ref", "version", "content"] }),
+	name: "memory_update", domain: "memory", mode: "write", surfaces: ["stage", "assistant"], label: "更正项目记忆",
+	description: () => "按 ref（如 chat:MEMORY、chat:大纲、chat:APPEND_SYSTEM）与可选版本号更新当前项目的 Markdown 记忆或局部守则文档，并自动同步 MEMORY.md 索引。",
+	parameters: () => ({ type: "object", properties: { ref: { type: "string" }, version: { type: "string" }, content: { type: "string" } }, required: ["ref", "content"] }),
 	async run(args, deps) {
 		try {
 			const g = deps.gate?.();
 			if (g) { const verdict = checkWriteGate({ toolName: "memory_update", ...g }); if (!verdict.allow) throw new Error(verdict.reason); }
-			if (!deps.updateMemory) throw new Error("卡级记忆修改不可用");
+			if (!deps.updateMemory) throw new Error("项目记忆修改不可用");
 			if (typeof args.content !== "string" || !args.content.trim()) throw new Error("content 为空；遗忘文档请用 memory_delete");
 			const doc = deps.updateMemory(strArg(args, "ref"), strArg(args, "version"), args.content);
-			return { text: JSON.stringify(doc), activity: "已更正卡级记忆" };
+			return { text: JSON.stringify(doc), activity: "已更正项目记忆" };
 		} catch (e) { return { text: errText(e), isError: true }; }
 	},
 };

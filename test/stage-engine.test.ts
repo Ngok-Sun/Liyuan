@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, afterEach, after } from "node:test";
@@ -11,6 +11,7 @@ import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@liyuan/ai/pro
 import { getModel, registerFauxProvider, streamSimple } from "@liyuan/ai/compat";
 
 import { StageEngine, type StageStreamFn, type StageEngineDeps } from "../src/stage/engine.ts";
+import { runBotSession } from "../server/bot-runtime.ts";
 import { getStageConnection } from "../src/stage/bridge.ts";
 import { applyDraftRevisions } from "../src/stage/draft-projection.ts";
 import { DraftStore, draftDirectory } from "../src/stage/draft-store.ts";
@@ -58,7 +59,9 @@ async function makePiEngine(deps: Omit<StageEngineDeps, "getSession"> & { sessio
 	// faux 流注入真实 Agent 的 provider seam；context / tool_call / 生命周期均走生产钩子。
 	if (!nativeProvider) session.agent.streamFunction = deps.sideStreamFn as never;
 	sessions.push(session);
-	const engine = new StageEngine({ ...deps, getSession: () => session as never });
+	const engine = new StageEngine({ ...deps, getSession: () => session as never,
+		runBotSession: o => runBotSession(o, { agentDir, modelRuntime, resolveModel: () => ({ model: selected, thinking: "off" }), stream: nativeProvider ? undefined : deps.sideStreamFn }),
+	});
 	sessionByEngine.set(engine, session);
 	return engine;
 }
@@ -666,7 +669,7 @@ test("旧工作模式会话：遗留条目读得回来，维护段不再进台�
 		reg.setResponses([
 			(ctx) => {
 				assert.doesNotMatch(JSON.stringify(ctx.messages), /【写卡维护】|AUTHOR_REQUEST_SENTINEL|AUTHOR_REPORT_SENTINEL|NATIVE_EDIT_SENTINEL/, "维护段与工具过程都不进台前上下文");
-				assert.ok(!ctx.tools.some((t: any) => ["conversation_mode", "lorebook_write", "memory_add", "memory_update", "memory_delete"].includes(t.name)));
+				assert.ok(!ctx.tools.some((t: any) => ["conversation_mode", "lorebook_write"].includes(t.name)));
 				return fauxAssistantMessage("她仍在山门旁等你。");
 			},
 			fauxScribeEmpty(),
@@ -678,7 +681,7 @@ test("旧工作模式会话：遗留条目读得回来，维护段不再进台�
 	} finally { reg.unregister(); rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("台前工具面：无 conversation_mode、无世界书写族与记忆写族；演出与读侧照旧", async () => {
+test("台前工具面：无 conversation_mode、无世界书写族；主模型保留记忆读写与演出读侧", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "liyuan-tools-face-"));
 	const cardDir = join(cwd, "cards", "云澜");
 	mkdirSync(cardDir, { recursive: true });
@@ -690,7 +693,7 @@ test("台前工具面：无 conversation_mode、无世界书写族与记忆写�
 	try {
 		const engine = await makePiEngine({
 			...piDeps(cwd, sm, reg.getModel("faux-rp")),
-			// 宿主件全给：工具下架只能因为「台上不注入那两族依赖」，不能是因为宿主没接
+			// 宿主件全给：工具下架只能因为「台上不注入世界书写族依赖」，不能是因为宿主没接
 			loreHost: {
 				write: () => null, update: () => null, remove: () => null,
 				listMarked: () => [], listBooks: () => ({ books: [], mounted: [] }),
@@ -712,10 +715,10 @@ test("台前工具面：无 conversation_mode、无世界书写族与记忆写�
 			fauxScribeEmpty(),
 		]);
 		await engine.performTurn("继续走。");
-		for (const gone of ["conversation_mode", "lorebook_write", "lorebook_update", "lorebook_delete", "lorebook_create", "memory_add", "memory_update", "memory_delete", "read", "write", "card_project"]) {
+		for (const gone of ["conversation_mode", "lorebook_write", "lorebook_update", "lorebook_delete", "lorebook_create", "read", "write", "card_project"]) {
 			assert.ok(!seen.includes(gone), `台上不该有 ${gone}`);
 		}
-		for (const kept of ["lorebook_search", "lorebook_read", "lorebook_list", "lorebook_files", "lorebook_toggle", "lorebook_mount", "memory_search", "memory_read", "memory_list", "card_read", "world_state_get", "worldline_list", "worldline_store", "panel_write", "panel_read", "panel_close", "draft_write", "previous_draft_edit", "ask"]) {
+		for (const kept of ["lorebook_search", "lorebook_read", "lorebook_list", "lorebook_files", "lorebook_toggle", "lorebook_mount", "memory_search", "memory_read", "memory_list", "memory_add", "memory_delete", "card_read", "world_state_get", "worldline_list", "worldline_store", "panel_write", "panel_read", "panel_close", "draft_write", "previous_draft_edit", "ask"]) {
 			assert.ok(seen.includes(kept), `台上应当有 ${kept}`);
 		}
 	} finally { reg.unregister(); rmSync(cwd, { recursive: true, force: true }); }
@@ -760,7 +763,16 @@ test("副编剧原生工具：卡内静默、卡外先拒后批、本会话授�
 			(ctx) => { assert.equal(asked.length, 4, "永久授权不再问"); assert.match(lastToolResult(ctx), /BOT_BASH_AGAIN/); return fauxAssistantMessage("前端看过了，卡里的笔记也写好了。"); },
 		]);
 		const r = await engine.botTurn("整理一下前端。");
-		assert.deepEqual(r, { text: "前端看过了，卡里的笔记也写好了。" });
+		assert.deepEqual(r, {
+			text: "前端看过了，卡里的笔记也写好了。",
+			tools: [
+				{ name: "write" },
+				{ name: "read", isError: true },
+				{ name: "read" },
+				{ name: "bash" },
+				{ name: "bash" },
+			],
+		});
 		assert.equal(readFileSync(join(cardDir, "创作", "note.txt"), "utf8"), "INSIDE_SENTINEL");
 		assert.match(asked[0]!, /请求读取：.*a\.ts[\s\S]*范围：web/);
 		assert.deepEqual(asked[2]!, "请求执行命令（bash 不受卡目录限制）：\necho BOT_BASH_OK");
@@ -781,7 +793,10 @@ test("副编剧原生工具：卡内静默、卡外先拒后批、本会话授�
 					return fauxAssistantMessage("那条命令被拦住了。");
 				},
 			]);
-			assert.deepEqual(await engine.botTurn("跑一下那条命令。"), { text: "那条命令被拦住了。" });
+			assert.deepEqual(await engine.botTurn("跑一下那条命令。"), {
+				text: "那条命令被拦住了。",
+				tools: [{ name: "bash", isError: true }],
+			});
 		} finally {
 			rmSync(join(SANDBOX_AGENT_DIR, "BASH_DENYLIST.txt"), { force: true });
 		}
@@ -998,31 +1013,74 @@ test("pi：等待 ask 时中断能传达信号，半拍不记账，下一拍可�
 	}
 });
 
-test("台上没有记忆写族：模型幻觉调用 memory_add 得到可读回绝，不落任何写入，这一拍照常收场", async () => {
-	const { cwd, sm } = makeStage();
-	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟", creationMode: "ask" }));
+test("项目级记忆与局部守则：主模型可写 记忆/*.md 与 MEMORY.md，同项目跨会话可见、跨项目物理隔离", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-chat-mem-"));
+	const cardDir = join(cwd, "cards", "云澜");
+	mkdirSync(cardDir, { recursive: true });
+	writeFileSync(join(cardDir, "云澜.json"), JSON.stringify({ data: { name: "云澜", description: "{{user}}的师姐", first_mes: "你来了。" } }));
+	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "cards/云澜/云澜.json", userName: "沈舟" }));
+	mkdirSync(join(cwd, ".liyuan"), { recursive: true });
+	const chat1SessDir = join(cardDir, "对话", "chat-1", "会话");
+	const chat2SessDir = join(cardDir, "对话", "chat-2", "会话");
+	mkdirSync(chat1SessDir, { recursive: true });
+	mkdirSync(chat2SessDir, { recursive: true });
+	writeFileSync(join(cardDir, "对话", "chat-1", "APPEND_SYSTEM.md"), "CHAT1_LOCAL_RULE_SENTINEL", "utf8");
+	writeFileSync(join(cardDir, "对话", "chat-1", "前情提要.md"), "CHAT1_SUMMARY_SENTINEL", "utf8");
+	const sm1a = SessionManager.create(cwd, chat1SessDir);
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
 	try {
-		let writes = 0;
-		const results: any[] = [];
-		const engine = await makePiEngine({
-			...piDeps(cwd, sm, reg.getModel("faux-rp")),
-			addMemory: async () => { writes++; return { added: 1, total: 1, chunks: 1 }; },
-		});
-		// 用户明说「记住」也不再放行——不是门禁拦下，是这台面上根本没有这件工具（撤依赖＝自然下架）
-		for (const input of ["继续走。", "记住他在东门等我的约定。"]) {
-			reg.setResponses([
-				fauxAssistantMessage([fauxToolCall("memory_add", { text: "他会在东门等候，时间是明日清晨。" })], { stopReason: "toolUse" }),
-				(ctx) => { results.push(ctx.messages.findLast((message: any) => message.role === "toolResult")); return fauxAssistantMessage("她点了点头。"); },
-				fauxScribeEmpty(),
-			]);
-			await engine.performTurn(input);
-		}
-		assert.equal(writes, 0, "两轮都没写进去");
-		assert.equal(results[0].isError, true, "回给模型的是可读的回绝");
-		assert.match(JSON.stringify(results[0].content), /not found|不可用/, "回绝文本可读（工具压根不在台上清单里）");
-		assert.match(rebuildHistory(sm.getBranch()).history.at(-1)!.text, /点了点头/, "回绝不打断这一拍");
-		assertSessionAligned(sessionByEngine.get(engine)!);
+		const engine1a = await makePiEngine(piDeps(cwd, sm1a, reg.getModel("faux-rp")), false, true);
+		let sys1a = "";
+		let msgs1a = "";
+		reg.setResponses([
+			fauxAssistantMessage([fauxToolCall("memory_add", { title: "东门之约", text: "明日清晨在东门等候沈舟。" })], { stopReason: "toolUse" }),
+			(ctx) => {
+				sys1a = String(ctx.systemPrompt ?? "");
+				msgs1a = JSON.stringify(ctx.messages);
+				return fauxAssistantMessage("她收起了信物。");
+			},
+			fauxScribeEmpty(),
+		]);
+		await engine1a.performTurn("记住东门的约定。");
+		assert.match(sys1a, /CHAT1_LOCAL_RULE_SENTINEL/, "项目 1 装配含项目级局部守则");
+		assert.match(msgs1a, /CHAT1_SUMMARY_SENTINEL/, "项目 1 新会话自动接力读取项目级前情提要.md");
+		assert.ok(existsSync(join(cardDir, "对话", "chat-1", "记忆", "东门之约.md")), "主模型调用 memory_add 落成项目级 .md");
+		assert.ok(existsSync(join(cardDir, "对话", "chat-1", "记忆", "MEMORY.md")), "自动维护项目级 MEMORY.md 索引");
+
+		// 同一项目 chat-1 下新建第二个会话 sm1b：立即看到 MEMORY.md 索引、APPEND_SYSTEM.md 与 前情提要.md
+		const sm1b = SessionManager.create(cwd, chat1SessDir);
+		const engine1b = await makePiEngine(piDeps(cwd, sm1b, reg.getModel("faux-rp")), false, true);
+		let sys1b = "";
+		let msgs1b = "";
+		reg.setResponses([
+			(ctx) => {
+				sys1b = String(ctx.systemPrompt ?? "");
+				msgs1b = JSON.stringify(ctx.messages);
+				return fauxAssistantMessage("她已在东门等候。");
+			},
+			fauxScribeEmpty(),
+		]);
+		await engine1b.performTurn("我来到东门。");
+		assert.match(sys1b, /CHAT1_LOCAL_RULE_SENTINEL/, "同项目新会话继承局部守则");
+		assert.match(sys1b, /东门之约\.md/, "同项目新会话常驻看到 MEMORY.md 索引");
+		assert.match(msgs1b, /CHAT1_SUMMARY_SENTINEL/, "同项目新会话继承项目级前情提要");
+
+		// 切换到同卡另一个项目 chat-2：完全隔离，不见 chat-1 的守则、MEMORY.md 与前情提要
+		const sm2 = SessionManager.create(cwd, chat2SessDir);
+		const engine2 = await makePiEngine(piDeps(cwd, sm2, reg.getModel("faux-rp")), false, true);
+		let sys2 = "";
+		let msgs2 = "";
+		reg.setResponses([
+			(ctx) => {
+				sys2 = String(ctx.systemPrompt ?? "");
+				msgs2 = JSON.stringify(ctx.messages);
+				return fauxAssistantMessage("初次见面。");
+			},
+			fauxScribeEmpty(),
+		]);
+		await engine2.performTurn("你好。");
+		assert.doesNotMatch(sys2, /CHAT1_LOCAL_RULE_SENTINEL|东门之约/, "不同项目间局部守则与 MEMORY.md 完全隔离");
+		assert.doesNotMatch(msgs2, /CHAT1_SUMMARY_SENTINEL/, "不同项目间前情提要完全隔离");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

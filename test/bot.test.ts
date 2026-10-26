@@ -7,11 +7,15 @@ import { test } from "node:test";
 import {
 	appendBotThread,
 	beatsOf,
+	BOT_BASE_RULES,
+	BOT_PERSONA_PRESETS,
 	BOT_TOOL_EXCLUDED,
+	buildBotCardBrief,
 	buildBotSystemPrompt,
 	buildBotView,
 	botThreadPath,
 	botTools,
+	clearBotThread,
 	readBotPersona,
 	readBotThread,
 	renderBeats,
@@ -43,15 +47,20 @@ test("bot：beatsOf 按拍分组——开场白算一拍，连续正文并入同
 	assert.deepEqual(beats[2], { user: "我坐下", assistant: "茶凉了。" });
 });
 
-test("bot：视野块＝前情提要（有才出）＋世界状态＋最近 K 拍；窗口截早", () => {
+test("bot：视野块＝默认跟随主模型完整视角（全部未压缩拍）；指定 window>0 时截最近 K 拍", () => {
 	const beats = Array.from({ length: 12 }, (_, i) => ({ user: `话${i + 1}`, assistant: `文${i + 1}` }));
-	const view = buildBotView({ summary: "很久以前……", state: "时间：夜", beats });
-	assert.match(view, /【前情提要】/);
-	assert.match(view, /很久以前……/);
-	assert.match(view, /【世界状态】\n时间：夜/);
-	assert.match(view, /【最近剧情】（第 5–12 拍/);
-	assert.doesNotMatch(view, /话4/);
-	assert.match(view, /〔第 12 拍·用户〕话12/);
+	const fullView = buildBotView({ summary: "很久以前……", state: "时间：夜", beats });
+	assert.match(fullView, /【前情提要】/);
+	assert.match(fullView, /很久以前……/);
+	assert.match(fullView, /【世界状态】\n时间：夜/);
+	assert.match(fullView, /【当前剧情】（第 1–12 拍）/);
+	assert.match(fullView, /〔第 1 拍·用户〕话1/);
+	assert.match(fullView, /〔第 12 拍·用户〕话12/);
+
+	const windowed = buildBotView({ summary: "很久以前……", state: "时间：夜", beats, window: 8 });
+	assert.match(windowed, /【最近剧情】（第 5–12 拍/);
+	assert.doesNotMatch(windowed, /话4/);
+	assert.match(windowed, /〔第 12 拍·用户〕话12/);
 	const noSummary = buildBotView({ state: "", beats: [] });
 	assert.equal(noSummary, "");
 });
@@ -77,14 +86,43 @@ test("bot：未知工具回文本不抛", async () => {
 
 // ---------------- system 与人设 ----------------
 
-test("bot：system＝身份站在前、人设在后；宏展开；空段跳过", () => {
+test("bot：system＝身份站在前、剧目信息与MCP居中、人设在后；宏展开；空段跳过", () => {
+	const brief = buildBotCardBrief({
+		card: { name: "阿离", description: "{{char}}是南岭剑修", personality: "冷冽", scenario: "雨夜茶寮" },
+		userName: "客官",
+		userPersona: "游方书生",
+		macro: { charName: "阿离", userName: "客官" },
+	});
+	assert.match(brief, /# 当前剧目：阿离（用户扮演：客官）/);
+	assert.match(brief, /游方书生/);
+	assert.match(brief, /阿离是南岭剑修/);
 	const out = buildBotSystemPrompt({
 		cardAppend: "本卡为{{char}}的世界。",
+		cardBrief: brief,
+		mcpTools: [{ name: "mcp__tavily__search", description: "联网搜索" }],
 		persona: "你是{{user}}的副编剧。",
 		macro: { charName: "阿离", userName: "客官" },
 	});
-	assert.equal(out, "本卡为阿离的世界。\n\n你是客官的副编剧。");
+	assert.ok(out.indexOf("本卡为阿离的世界。") < out.indexOf("# 当前剧目：阿离"));
+	assert.ok(out.indexOf("# 外部工具（MCP）") < out.indexOf("你是客官的副编剧。"));
 	assert.equal(buildBotSystemPrompt({ cardAppend: "", persona: "只有人设", macro: { charName: "x", userName: "y" } }), "只有人设");
+});
+
+test("bot：内置三套性格模板只含纯性格描述；底层固定规范 BOT_BASE_RULES 经 includeBaseRules 自动拼入", () => {
+	assert.deepEqual(BOT_PERSONA_PRESETS.map((p) => p.id), ["default", "gentle", "scholar"]);
+	for (const p of BOT_PERSONA_PRESETS) {
+		assert.doesNotMatch(p.content, /<style_guide>/);
+		assert.doesNotMatch(p.content, /<work_rules>/);
+	}
+	assert.match(BOT_BASE_RULES, /绝对禁止.*括号/);
+	const withBase = buildBotSystemPrompt({
+		cardAppend: "",
+		persona: BOT_PERSONA_PRESETS[0]!.content,
+		macro: { charName: "阿离", userName: "客官" },
+		includeBaseRules: true,
+	});
+	assert.match(withBase, /# 对话风格与格式规范/);
+	assert.match(withBase, /# 幕后工作准则/);
 });
 
 test("bot：人设读取——卡级覆盖全局，都缺退随包默认", () => {
@@ -112,19 +150,21 @@ test("bot：线程路径＝子项目一份；老布局回落 .liyuan/副编剧",
 	assert.equal(botThreadPath("E:/ws", undefined, "s1"), join("E:/ws", ".liyuan", "副编剧", "s1.jsonl"));
 });
 
-test("bot：线程读写——往返、坏行跳过、空文本不落", () => {
+test("bot：线程读写與清理——含 tools 轨迹往返、坏行跳过、空文本不落、clearBotThread 清空", () => {
 	const root = mkdtempSync(join(tmpdir(), "bot-thread-"));
 	try {
 		const file = join(root, "副编剧.jsonl");
 		assert.deepEqual(readBotThread(file), []);
 		const entries: BotThreadEntry[] = [
 			{ role: "user", text: "师姐的师父是谁", ts: 1 },
-			{ role: "assistant", text: "是玄机子。", ts: 2 },
+			{ role: "assistant", text: "是玄机子。", ts: 2, tools: [{ name: "lorebook_search", detail: "检索设定" }] },
 		];
 		appendBotThread(file, entries);
 		appendBotThread(file, [{ role: "user", text: "   " }]);
 		writeFileSync(file, `${readFileSync(file, "utf8")}坏行\n{"role":"x"}\n`, "utf8");
 		assert.deepEqual(readBotThread(file), entries);
+		clearBotThread(file);
+		assert.deepEqual(readBotThread(file), []);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -237,21 +277,47 @@ test("bot：原生工具进清单并派发；抛错回可读文本不打断这�
 		...loopBase, stream, tools,
 		execute: (name, args) => runBotTool({ deps, tools, native, name, args, language: "中文", beats: [] }),
 	});
-	assert.deepEqual(looped, { text: "看过了。" });
+	assert.deepEqual(looped, { text: "看过了。", tools: [{ name: "read" }] });
 });
 
-test("bot：一轮直答——单次调用、返回文本、视野块与用户话同条消息", async () => {
+test("bot：MCP 外设与 skill_read 进清单并正常派发", async () => {
+	const deps = {
+		getState: () => defaultState(),
+		formatState: (s: ReturnType<typeof defaultState>) => formatState(s),
+		getSkill: (name: string) => (name === "考据指南" ? "考据正文" : undefined),
+	} as unknown as StageToolDeps;
+	const mcp = {
+		listTools: () => [{ serverId: "tavily", name: "search", qualifiedName: "mcp__tavily__search", description: "联网搜索", inputSchema: { type: "object", properties: { q: { type: "string" } } } }],
+		callTool: async (_srv: string, _tool: string, args: Record<string, unknown>) => ({
+			content: [{ type: "text" as const, text: `搜索结果：${args.q}` }],
+			details: {},
+		}),
+	};
+	const tools = botTools("中文", deps, [], { skills: [{ name: "考据指南", description: "如何考据" }], mcp });
+	assert.ok(tools.some((t) => t.name === "skill_read"));
+	assert.ok(tools.some((t) => t.name === "mcp__tavily__search"));
+	const rMcp = await runBotTool({ deps, tools, mcp, name: "mcp__tavily__search", args: { q: "南岭地理" }, language: "中文", beats: [] });
+	assert.equal(rMcp.text, "搜索结果：南岭地理");
+	assert.equal(rMcp.activity, "MCP tavily · search");
+	const rSkill = await runBotTool({ deps, tools, mcp, name: "skill_read", args: { name: "考据指南" }, language: "中文", beats: [] });
+	assert.match(rSkill.text, /考据正文/);
+});
+
+test("bot：一轮直答——视野块置于首轮背景对（缓存锚点），末尾为纯净用户原话", async () => {
 	const { stream, contexts } = scripted([[asstMsg([{ text: "是玄机子。" }])]]);
 	const r = await runBotLoop({ ...loopBase, stream });
 	assert.deepEqual(r, { text: "是玄机子。" });
 	assert.equal(contexts.length, 1);
 	const msgs = contexts[0]!.messages as Array<{ role: string; content: Array<{ text?: string }> }>;
-	const last = msgs[msgs.length - 1]!;
-	assert.equal(last.role, "user");
-	assert.equal(last.content[0]!.text, "【世界状态】\n时间：夜\n\n师姐的师父是谁");
+	assert.equal(msgs.length, 3);
+	assert.equal(msgs[0]!.role, "user");
+	assert.equal(msgs[0]!.content[0]!.text, "【世界状态】\n时间：夜");
+	assert.equal(msgs[1]!.role, "assistant");
+	assert.equal(msgs[2]!.role, "user");
+	assert.equal(msgs[2]!.content[0]!.text, "师姐的师父是谁");
 });
 
-test("bot：工具轮——回执进下一轮、文本取最后一轮、过程条上报", async () => {
+test("bot：工具轮——回执进下一轮、文本取最后一轮、过程条与 tools 轨迹上报", async () => {
 	const seen: Array<{ name: string; args: Record<string, unknown> }> = [];
 	const activities: string[] = [];
 	const { stream, contexts } = scripted([
@@ -267,7 +333,7 @@ test("bot：工具轮——回执进下一轮、文本取最后一轮、过程�
 		},
 		onActivity: (d) => activities.push(d),
 	});
-	assert.deepEqual(r, { text: "是玄机子。" });
+	assert.deepEqual(r, { text: "是玄机子。", tools: [{ name: "lorebook_search", detail: "检索设定" }] });
 	assert.deepEqual(seen, [{ name: "lorebook_search", args: { query: "师姐" } }]);
 	assert.deepEqual(activities, ["检索设定"]);
 	const second = contexts[1]!.messages as Array<{ role: string; toolCallId?: string; content: Array<{ text?: string }> }>;
@@ -280,7 +346,7 @@ test("bot：触阀以现有产出收束；错误事件原样上报", async () =>
 	const always = asstMsg([{ tool: { id: "t", name: "lorebook_search" } }]);
 	const { stream } = scripted([[always]]);
 	const r = await runBotLoop({ ...loopBase, stream, maxRounds: 3, execute: async () => ({ text: "又一条" }) });
-	assert.deepEqual(r, { text: "" });
+	assert.deepEqual(r, { text: "", tools: [{ name: "lorebook_search" }, { name: "lorebook_search" }, { name: "lorebook_search" }] });
 	const errStream: BotStreamFn = () => {
 		const iter = (async function* () {
 			yield { type: "error", error: { role: "assistant", content: [], errorMessage: "上游 500" } } as BotStreamEvent;
@@ -291,7 +357,7 @@ test("bot：触阀以现有产出收束；错误事件原样上报", async () =>
 	assert.deepEqual(r2, { error: "上游 500" });
 });
 
-test("bot：线程回放进送模（历史各就各位）", async () => {
+test("bot：线程回放进送模（视野块恒在线程回放之前，同拍多轮对话前缀 100% 稳定）", async () => {
 	const { stream, contexts } = scripted([[asstMsg([{ text: "接着答" }])]]);
 	await runBotLoop({
 		...loopBase,
@@ -302,12 +368,16 @@ test("bot：线程回放进送模（历史各就各位）", async () => {
 		],
 	});
 	const msgs = contexts[0]!.messages as Array<{ role: string; content: Array<{ text?: string }> }>;
-	assert.equal(msgs.length, 3);
+	assert.equal(msgs.length, 5);
 	assert.equal(msgs[0]!.role, "user");
-	assert.equal(msgs[0]!.content[0]!.text, "第一问");
+	assert.equal(msgs[0]!.content[0]!.text, "【世界状态】\n时间：夜");
 	assert.equal(msgs[1]!.role, "assistant");
-	assert.equal(msgs[1]!.content[0]!.text, "第一答");
 	assert.equal(msgs[2]!.role, "user");
+	assert.equal(msgs[2]!.content[0]!.text, "第一问");
+	assert.equal(msgs[3]!.role, "assistant");
+	assert.equal(msgs[3]!.content[0]!.text, "第一答");
+	assert.equal(msgs[4]!.role, "user");
+	assert.equal(msgs[4]!.content[0]!.text, "师姐的师父是谁");
 });
 
 test("bot：renderBeats 头尾（供视野与 story_read 共用版式）", () => {

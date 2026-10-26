@@ -430,3 +430,29 @@ export const IconPalette = (p: IconProps) => (
 		<path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.6-.7 1.6-1.6 0-.4-.2-.8-.5-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.6 1.6-1.6H16c3.3 0 6-2.7 6-6 0-5.5-4.5-10-10-10z" />
 	</Icon>
 );
+
+/** 副编剧 Bot 图标（对齐右下角伴随机器人造型：天线 + 圆角机头 + 双眼） */
+export const IconBot = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M12 6V3" />
+		<circle cx="12" cy="2.5" r="1" fill="currentColor" stroke="none" />
+		<rect x="4" y="6" width="16" height="13" rx="4.5" />
+		<circle cx="9.2" cy="12.5" r="1.4" fill="currentColor" stroke="none" />
+		<circle cx="14.8" cy="12.5" r="1.4" fill="currentColor" stroke="none" />
+		<path d="M2 11v3" />
+		<path d="M22 11v3" />
+	</Icon>
+);
+
+/** Markdown 文档 / 项目资产图标 */
+export const IconDoc = (p: IconProps) => (
+	<Icon {...p}>
+		<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+		<path d="M14 2v4a2 2 0 0 0 2 2h4" />
+		<path d="M10 9H8" />
+		<path d="M16 13H8" />
+		<path d="M16 17H8" />
+	</Icon>
+);
+
+

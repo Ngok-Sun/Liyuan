@@ -15,7 +15,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, normalize, relative } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
@@ -48,6 +48,14 @@ import { findInitVar, findSchemaDefaults, seedMvuIfNeeded } from "../src/mvu.ts"
 import { authorScriptManifest, extractAuthorScripts } from "../src/authorScripts.ts";
 import { buildGreeting } from "../src/greeting.ts";
 import { StageEngine, type AssistantMsgLike, type StageModelLike, type StageStreamFn } from "../src/stage/engine.ts";
+import {
+	BOT_PERSONA_FILE,
+	BOT_PERSONA_PRESETS,
+	botThreadPath,
+} from "../src/stage/bot.ts";
+import { BotSessionStore, runBotSession } from "./bot-runtime.ts";
+import type { BotModelSelection, BotSessionAction } from "../src/stage/bot-session-types.ts";
+import { botRulesPath, rulesAgentDir } from "../src/user-rules.ts";
 import { displayConversationBranch, storyBranch, messageMode } from "../src/conversation-mode.ts";
 import { cardProjectOperation, previewCardProject } from "../src/card-authoring.ts";
 import { buildCardPreviewRequest, CardPreviewHub } from "./card-preview.ts";
@@ -149,10 +157,10 @@ import {
 } from "./wire.ts";
 import { chapterTitle, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type Checkpoint } from "../src/stage/story-history.ts";
 import { DISCUSSION_SUMMARY_TYPE } from "../src/stage/discussion.ts";
-import { chatDirOf, chatSessionsDirOf, sameCardPath } from "../src/paths.ts";
+import { chatDirOf, chatSessionsDirOf, insidePath, sameCardPath } from "../src/paths.ts";
 import { readSessionCardInfo } from "../src/session-scan.ts";
 import { t } from "../src/i18n/index.ts";
-import { cardDirOfChatDir, cardFileIn, chatDataPath, chatDirOfSessionDir, chatModeOfSessionDir, createChat, loadCardConfig, mergeCardConfig, resolveCardSpace } from "../src/cardspace.ts";
+import { cardDirOfChatDir, cardFileIn, chatDataPath, chatDirOfSessionDir, chatModeOfSessionDir, createChat, listChatMarkdownAssets, loadCardConfig, mergeCardConfig, resolveCardSpace } from "../src/cardspace.ts";
 import { chatSessionsOf, chatsOfCard, ensureStorySessionDir, newChatSessionDir, storySessionTarget } from "../src/story-guide.ts";
 import { loadManifest, memoryPaths, saveManifest, syncCardMemory } from "../src/card-memory.ts";
 import { alreadyMigrated, applyCardMigration, planCardMigration, planOrphanSessions, promoteStagedCard } from "../src/migrate-cards.ts";
@@ -187,7 +195,7 @@ const cwd = process.cwd();
 const productRoot = process.env.LIYUAN_PRODUCT_ROOT ?? cwd;
 // 扮演骨架播种（刀1，docs/PLAN-AGENT-SLOTS.md §七）：首次启动把随包的
 // assets/SYSTEM.md 落到 <agentDir>/SYSTEM.md；已存在不覆盖——改了就是用户的。
-seedStageSystemPrompt(cwd, agentHome);
+seedStageSystemPrompt(productRoot, agentHome);
 seedBashDenylist(agentHome);
 seedBuiltinSkills(cwd);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -958,6 +966,8 @@ const helloFrame = (): ServerFrame => {
 	 * 前端拿清单算指纹，只在换卡/换预设（指纹变了）时才去拉一次正文。
 	 */
 	const { scripts, ...cardfrontLite } = cardfront;
+	const botFile = botThreadPath(cwd, session.sessionManager.getSessionDir(), session.sessionId);
+	const botSnapshot = new BotSessionStore(botFile, cwd).snapshot(botStreamingFlag);
 	return {
 		type: "hello",
 		uiLanguage: loadConfig(cwd).uiLanguage,
@@ -970,6 +980,9 @@ const helloFrame = (): ServerFrame => {
 		panels: currentPanels(),
 		workspace: workspace ? workspaceView(workspace) : undefined,
 		streaming: stage?.isStreaming ?? false,
+		botMessages: botSnapshot.messages,
+		botSession: botSnapshot,
+		botStreaming: botStreamingFlag,
 		conversationMode: stage?.mode ?? "roleplay",
 		turnMode: stage?.turnMode,
 		...(stage?.mode === "agent" ? { story: storyOutline() } : {}),
@@ -978,8 +991,38 @@ const helloFrame = (): ServerFrame => {
 	};
 };
 
+let botStreamingFlag = false;
+
 /** 全量重放（斜杠命令 / 树导航 / 压缩后：让所有端与会话文件对齐） */
 const resyncAll = () => broadcast(helloFrame());
+
+const botStore = () => new BotSessionStore(botThreadPath(cwd, session.sessionManager.getSessionDir(), session.sessionId), cwd);
+const resolveBotModel = (selection?: BotModelSelection) => {
+	if (!selection) {
+		if (!session.model) throw new Error(t("尚未配置副编剧模型"));
+		return { model: session.model, thinking: session.thinkingLevel };
+	}
+	const config = loadAgentConfig(cwd).config;
+	const entry = findModelEntry(config.providers?.[selection.provider]?.models, selection.entry);
+	if (!entry) throw new Error(t("副编剧指定的模型条目已不存在"));
+	const model = session.modelRuntime.getModel(selection.provider, entry.id);
+	if (!model || !session.modelRuntime.hasConfiguredAuth(model.provider)) throw new Error(t("副编剧指定的模型不可用或缺少鉴权"));
+	return { model, thinking: selection.thinking ?? thinkingLevelOfEntry(config, selection.provider, selection.entry), label: `${selection.provider}/${selection.entry}` };
+};
+const manageBot = async (request: BotSessionAction) => {
+	if (request.action === "stop") { stage.abortBot(); return botStore().snapshot(botStreamingFlag); }
+	if (storyStreaming() || botStreamingFlag) throw new Error(t("请先停止生成，再管理副编剧会话"));
+	if (stage.mode === "agent") throw new Error(t("副编剧只服务扮演会话"));
+	if (request.action === "compact") { await handleBotPrompt("", true); return botStore().snapshot(); }
+	if (request.action === "model" && request.model) {
+		if (typeof request.model.provider !== "string" || typeof request.model.entry !== "string") throw new Error(t("副编剧模型选择无效"));
+		if (request.model.thinking && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(request.model.thinking)) throw new Error(t("副编剧模型选择无效"));
+		resolveBotModel(request.model);
+	}
+	const snapshot = botStore().manage(request);
+	broadcast({ type: "bot_session", snapshot });
+	return snapshot;
+};
 
 const workspaceView = (workspace: TurnWorkspace) => {
 	const { mediaDeliveries: _media, ...view } = workspace;
@@ -1525,28 +1568,15 @@ const syncCardMemoryOnce = async (cardDir: string) => {
 	}
 };
 
-const runCardMemorySync = (cardDir: string) => {
-	memorySyncBusy.add(cardDir);
-	void syncCardMemoryOnce(cardDir).finally(() => {
-		memorySyncBusy.delete(cardDir);
-		if (memorySyncQueued.delete(cardDir)) runCardMemorySync(cardDir); // 忙时来的触发：收尾后带上最新内容补跑
-	});
+// 卡级后台自动复盘已废除（2026-10-18 定案：记忆严格限在当前子项目内，不跨项目复盘合并）
+const runCardMemorySync = (_cardDir: string) => {
+	void syncCardMemoryOnce;
+	void memorySyncBusy;
+	void memorySyncQueued;
 };
 
 const syncMemoryForSession = () => {
-	try {
-		const chatDir = chatDirOfSessionDir(session.sessionManager.getSessionDir());
-		if (!chatDir) return; // 老布局/内存会话：行为与今天一致
-		const cardDir = cardDirOfChatDir(chatDir);
-		if (!cardDir) return;
-		if (memorySyncBusy.has(cardDir)) {
-			memorySyncQueued.add(cardDir);
-			return;
-		}
-		runCardMemorySync(cardDir);
-	} catch (err) {
-		console.error(`[card-memory] 触发同步异常：${err instanceof Error ? err.message : String(err)}`); // i18n-ignore：终端日志
-	}
+	// 保持空操作：切会话/删会话不再触发跨项目卡级复盘
 };
 
 const bindSession = async () => {
@@ -1734,7 +1764,9 @@ const currentModelInfo = (): CurrentModelInfo | null => {
 
 const restHost: RestHost = {
 	cwd,
-	isStreaming: () => session.isStreaming,
+	isStreaming: () => session.isStreaming || botStreamingFlag,
+	botSnapshot: () => botStore().snapshot(botStreamingFlag),
+	manageBot,
 	settleCardPreview: (report) => cardPreviews.settle(report),
 	settleScreenshot: (report) => screenshots.settle(report),
 	runCardPreview: (args) => {
@@ -1873,7 +1905,7 @@ const restHost: RestHost = {
 		refreshNamesFromConfig();
 		resyncAll();
 	},
-	async switchToCard() {
+	async switchToCard(opts?: { switchSession?: boolean }) {
 		refreshNamesFromConfig(); // rest.ts 已写盘新 card，先让会话过滤对准新卡
 		// 换卡：装载中的预设要按新卡（宏按卡求值）重新落条目；声明全局留档（assets/presets/.liyuan/），
 		// 换卡不再重复问模型。后台跑，不挡切会话：链条自带串行（presetSyncChain）与跑完通知；
@@ -1881,6 +1913,10 @@ const restHost: RestHost = {
 		void syncPresetNow();
 		// 清卡缓存：换卡后列表必须按新 cardPath 重读 rp-card
 		cardCache.clear();
+		if (opts?.switchSession === false) {
+			broadcast(await listSessions());
+			return "switched";
+		}
 		const frame = await listSessions();
 		const list = (frame as { type: "sessions"; list: Array<{ path: string; current: boolean; card?: string }> }).list;
 		// 只在本卡会话里挑「最近非当前」；没有则新建（不把其它卡的 current 误当目标）
@@ -1906,6 +1942,7 @@ const restHost: RestHost = {
 				});
 				wireRuntimeHooks();
 				await bindSession();
+				resyncAll();
 				result = "created";
 			} else {
 				await runtime.newSession();
@@ -2327,51 +2364,26 @@ const syncPresetNow = (reprocess = false): Promise<PresetSyncResult | undefined>
 			if (lore.state === "written") {
 				broadcast({ type: "notify", level: "info", text: t("卡档案已同步世界书常驻条目：{n} 条", { n: lore.entries }) });
 			}
-			if (r.mode === "process") {
-				if (r.processError) {
-					broadcast({
-						type: "notify",
-						level: "error",
-						text: t("预设「{preset}」处理失败（产物暂缺，原因已落档 assets/presets/.liyuan/）：{error}", { preset: r.preset, error: r.processError }),
-					});
-				} else if (r.needProcess) {
-					broadcast({ type: "notify", level: "info", text: t("预设「{preset}」尚未处理——到预设库点「重新装载」生成产物（要几分钟）", { preset: r.preset }) });
-				} else if (r.state === "written" && r.preset) {
-					broadcast({
-						type: "notify",
-						level: "info",
-						text: t("预设「{preset}」已处理：身份 {identity} 字、写作 {writing} 字{how}{stale}", {
-							preset: r.preset,
-							identity: r.identityChars ?? 0,
-							writing: r.writingChars ?? 0,
-							how: r.processed ? t("（本次模型处理）") : t("（沿用留档）"),
-							stale: r.stale ? t("；选项已改，要点「重新装载」才更新") : "",
-						}),
-					});
-				}
-			} else {
-				if (r.declareError) {
-					broadcast({
-						type: "notify",
-						level: "error",
-						text: t("预设「{preset}」声明失败（{pending} 段先按保守方式全部保留）：{error}", { preset: r.preset, pending: r.pending, error: r.declareError }),
-					});
-				}
-				if (r.state === "written" && r.preset) {
-					broadcast({
-						type: "notify",
-						level: "info",
-						text: t("预设「{preset}」已转译：活动条目 {active} 条、停用 {disabled} 条{declared}", {
-							preset: r.preset,
-							active: r.active,
-							disabled: r.disabled,
-							declared: r.declared ? t("（本次声明 {n} 段）", { n: r.declared }) : "",
-						}),
-					});
-				}
+			if (r.declareError) {
+				broadcast({
+					type: "notify",
+					level: "error",
+					text: t("预设「{preset}」声明失败（{pending} 段先按保守方式全部保留）：{error}", { preset: r.preset, pending: r.pending, error: r.declareError }),
+				});
 			}
-			// 卸载剥净才提示（process 机制缺留档的剥净有自己的 needProcess 提示，别误报「已卸载」）
-			if (r.state === "stripped" && r.mode !== "process") {
+			if (r.state === "written" && r.preset) {
+				broadcast({
+					type: "notify",
+					level: "info",
+					text: t("预设「{preset}」已转译：活动条目 {active} 条、停用 {disabled} 条{declared}", {
+						preset: r.preset,
+						active: r.active,
+						disabled: r.disabled,
+						declared: r.declared ? t("（本次声明 {n} 段）", { n: r.declared }) : "",
+					}),
+				});
+			}
+			if (r.state === "stripped") {
 				broadcast({ type: "notify", level: "info", text: t("预设已卸载：卡文件里的（预设）条目已移除") });
 			}
 			return r;
@@ -2707,6 +2719,10 @@ const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
 stage = new StageEngine({
 	cwd,
+	runBotSession: options => runBotSession(options, {
+		agentDir: rulesAgentDir(), modelRuntime: session.modelRuntime, resolveModel: resolveBotModel,
+		onSnapshot: snapshot => broadcast({ type: "bot_session", snapshot }),
+	}),
 	getSession: () => session as never,
 	getModel: () => session.model as never,
 	getAuth: async (m) => {
@@ -3071,12 +3087,10 @@ const hostCompact = async (): Promise<void> => {
 
 /** 发送用户输入（含斜杠命令；命令后全量对齐所有端） */
 /**
- * 副编剧入口（PLAN-COMPANION-BOT 刀 1）：/bot <话>。
- * 引擎侧＝stage.botTurn（独立线程、与台前串行）；界面（抽屉）在下一刀——没有命令行在场时
- * 先如实告知，不让它变成一个黑洞。
+ * 副编剧入口（PLAN-COMPANION-BOT）：/bot <话> | /bot clear | /bot persona [list|<id> [card|global]]。
+ * 引擎侧＝stage.botTurn（独立线程、与台前串行）；CLI 与 Web WS 共用同一条执行与广播链路。
  */
-const handleBotPrompt = async (text: string) => {
-	// 回执两处都到：CLI 看终端、Web 看 notify（副编剧的主要面是命令行，只广播等于没回执）
+const handleBotPrompt = async (text: string, compact = false) => {
 	const say = (level: "info" | "warning" | "error", message: string) => {
 		cli?.out(`[${level}] ${message}`);
 		broadcast({ type: "notify", level, text: message });
@@ -3085,29 +3099,91 @@ const handleBotPrompt = async (text: string) => {
 		say("warning", t("副编剧只服务扮演会话"));
 		return;
 	}
-	if (!text) {
+	if (!text && !compact) {
 		say("info", t("用法：/bot <话>——幕后副编剧：问剧情、点评、改设定，独立线程不进剧情历史"));
 		return;
 	}
-	if (!cli) {
-		say("info", t("副编剧界面还没接，当前只在命令行可用"));
+	if (/^clear$/i.test(text)) {
+		await manageBot({ action: "new" });
+		say("info", t("已清空副编剧对话记录"));
 		return;
 	}
-	if (storyStreaming()) {
+	const command = /^(sessions|new|open|rename|delete|model|compact|stop)(?:\s+([\s\S]*))?$/.exec(text);
+	if (command) {
+		const name = command[1], arg = command[2]?.trim() ?? "";
+		let request: BotSessionAction;
+		if (name === "model") {
+			const [provider, entry, thinking] = arg.split(/\s+/);
+			request = { action: "model", model: !arg || arg === "follow" ? null : { provider, entry, ...(thinking ? { thinking } : {}) } };
+		} else if (name === "open" || name === "delete") request = { action: name, id: arg };
+		else if (name === "rename" || name === "new") request = { action: name, name: arg };
+		else request = { action: name === "sessions" ? "list" : name as "compact" | "stop" };
+		const snapshot = await manageBot(request);
+		cli?.out(`[bot session] ${JSON.stringify(snapshot)}`);
+		return;
+	}
+	const personaMatch = /^persona(?:\s+(\S+)(?:\s+(card|global))?)?$/i.exec(text);
+	if (personaMatch) {
+		const arg = (personaMatch[1] ?? "list").toLowerCase();
+		const targetScope = (personaMatch[2] ?? "global").toLowerCase();
+		if (arg === "list") {
+			const listText = BOT_PERSONA_PRESETS.map((p) => `- ${p.id}（${p.name}）：${p.tagline}`).join("\n");
+			cli?.out(`[bot persona]\n${listText}`); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		const preset = BOT_PERSONA_PRESETS.find((p) => p.id === arg);
+		if (!preset) {
+			cli?.out(`[warning] 未知副编剧人设模板：${arg}（可选：${BOT_PERSONA_PRESETS.map((p) => p.id).join(" / ")}）`); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		const curChatDir = chatDirOfSessionDir(session.sessionManager.getSessionDir());
+		const curCardDir = curChatDir ? cardDirOfChatDir(curChatDir) : resolveCardSpace(cwd, cardPath)?.dir;
+		const targetPath = targetScope === "card" && curCardDir ? join(curCardDir, BOT_PERSONA_FILE) : botRulesPath();
+		mkdirSync(dirname(targetPath), { recursive: true });
+		writeFileSync(targetPath, preset.content, "utf8");
+		cli?.out(`[bot persona] 已切换为「${preset.name}」（${targetPath}）`); // i18n-ignore：CLI 终端输出
+		return;
+	}
+	if (storyStreaming() || botStreamingFlag) {
 		say("warning", t("请等当前回复完成（或先停止），再{what}", { what: t("唤副编剧") }));
 		return;
 	}
-	cli.out("[副编剧]"); // i18n-ignore：终端日志
-	const r = await stage.botTurn(text, {
-		onDelta: (kind, delta) => cli?.stream(kind, delta),
-		onActivity: (d) => cli?.out(`[activity] ${d}`),
-	});
-	cli.out("");
-	if ("error" in r) {
-		cli.out(`[error] ${r.error}`); // i18n-ignore：终端日志
-		broadcast({ type: "notify", level: "error", text: t("副编剧没有完成这一轮") });
+	const userTs = Date.now();
+	botStreamingFlag = true;
+	if (!compact) broadcast({ type: "bot_message", message: { role: "user", text, ts: userTs } });
+	broadcast({ type: "bot_state", state: "start" });
+	cli?.out("[副编剧]"); // i18n-ignore：终端日志
+	try {
+		const r = await stage.botTurn(compact ? "/compact" : text, {
+			compact,
+			onDelta: (kind, delta) => {
+				cli?.stream(kind, delta);
+				broadcast({ type: "bot_delta", kind, delta });
+			},
+			onActivity: (d) => cli?.out(`[activity] ${d}`),
+			onToolCall: (rec) => {
+				broadcast({
+					type: "bot_activity",
+					activity: {
+						kind: "tool_end",
+						name: rec.name,
+						...(rec.detail ? { detail: rec.detail } : {}),
+						...(rec.isError ? { isError: true } : {}),
+					},
+				});
+			},
+		});
+		cli?.out("");
+		if ("error" in r) {
+			cli?.out(`[error] ${r.error}`); // i18n-ignore：终端日志
+			broadcast({ type: "notify", level: "error", text: t("副编剧没有完成这一轮") });
+		} else if (compact) cli?.out(r.text);
+	} finally {
+		botStreamingFlag = false;
+		broadcast({ type: "bot_session", snapshot: botStore().snapshot() });
+		broadcast({ type: "bot_state", state: "end" });
+		cli?.out("[end] mode=bot"); // i18n-ignore：终端日志（与台上 [end] mode=… 同一约定，驱动器据此续跑）
 	}
-	cli.out("[end] mode=bot"); // i18n-ignore：终端日志（与台上 [end] mode=… 同一约定，驱动器据此续跑）
 };
 
 const handlePrompt = async (text: string) => {
@@ -3134,6 +3210,151 @@ const handlePrompt = async (text: string) => {
 	const botMatch = /^\/bot(?:[ \t]+([\s\S]*))?$/i.exec(trimmed);
 	if (botMatch) {
 		await handleBotPrompt((botMatch[1] ?? "").trim());
+		return;
+	}
+	if (botStreamingFlag) throw new Error(t("请先停止生成，再管理副编剧会话"));
+	// CLI / 宿主命令：/project（列出项目、新建项目、切换项目）与 /session（同项目新建会话、列出会话、切换会话）与 /assets（项目级 .md 资产）
+	const projectMatch = /^\/project(?:[ \t]+([\s\S]*))?$/i.exec(trimmed);
+	if (projectMatch) {
+		const sub = (projectMatch[1] ?? "").trim();
+		const chats = chatsOfCard(cwd, cardPath) ?? [];
+		const curChatDir = chatDirOfSessionDir(session.sessionManager.getSessionDir());
+		const curChatId = curChatDir ? basename(curChatDir) : null;
+		if (!sub || sub === "list") {
+			const lines = chats.map((c) => `${c.id === curChatId ? "* " : "  "}${c.id} [${c.meta.mode ?? "roleplay"}] ${c.meta.name ?? "(未命名)"} (${c.sessionCount} 会话)`); // i18n-ignore：CLI 终端输出
+			cli?.out(lines.length ? lines.join("\n") : "[project] 暂无项目"); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		const newM = /^new(?:[ \t]+(agent|roleplay))?(?:[ \t]+(.+))?$/i.exec(sub);
+		if (newM) {
+			const mode = newM[1]?.toLowerCase() === "agent" ? "agent" : undefined;
+			const name = newM[2]?.trim() || undefined;
+			const freshDir = newChatSessionDir(cwd, cardPath, name, mode);
+			if (!freshDir) {
+				cli?.out("[project] 当前卡不在 cards/ 下"); // i18n-ignore：CLI 终端输出
+				return;
+			}
+			const previousSessionFile = session.sessionFile;
+			await runtime.dispose();
+			runtime = await createAgentSessionRuntime(createRuntime, {
+				cwd,
+				agentDir: getAgentDir(),
+				sessionManager: SessionManager.create(cwd, freshDir),
+				sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
+			});
+			wireRuntimeHooks();
+			await bindSession();
+			resyncAll();
+			const nChat = chatDirOfSessionDir(session.sessionManager.getSessionDir());
+			cli?.out(`[project] 已新建并切入项目 ${nChat ? basename(nChat) : ""}`); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		const openM = /^open[ \t]+(\S+)$/i.exec(sub);
+		if (openM) {
+			const targetId = openM[1]!;
+			const target = chats.find((c) => c.id === targetId || c.meta.name === targetId);
+			if (!target) {
+				cli?.out(`[project] 未找到项目：${targetId}`); // i18n-ignore：CLI 终端输出
+				return;
+			}
+			const targetSessions = chatSessionsOf(cwd, cardPath)?.filter((s) => s.chatId === target.id) ?? [];
+			if (targetSessions[0]) {
+				await runtime.switchSession(targetSessions[0].path);
+			} else {
+				const previousSessionFile = session.sessionFile;
+				await runtime.dispose();
+				runtime = await createAgentSessionRuntime(createRuntime, {
+					cwd,
+					agentDir: getAgentDir(),
+					sessionManager: SessionManager.create(cwd, target.sessionsDir),
+					sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
+				});
+				wireRuntimeHooks();
+				await bindSession();
+			}
+			resyncAll();
+			cli?.out(`[project] 已切入项目 ${target.id}`); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		cli?.out("[project] 用法：/project [list | new [roleplay|agent] [名称] | open <chatId>]"); // i18n-ignore：CLI 终端输出
+		return;
+	}
+	const sessionMatch = /^\/session(?:[ \t]+([\s\S]*))?$/i.exec(trimmed);
+	if (sessionMatch) {
+		const sub = (sessionMatch[1] ?? "").trim();
+		const curChatDir = chatDirOfSessionDir(session.sessionManager.getSessionDir());
+		const curChatId = curChatDir ? basename(curChatDir) : null;
+		const all = (await sessionInfos()).filter((s) => !curChatId || s.chatId === curChatId);
+		if (!sub || sub === "list") {
+			const lines = all.map((s, i) => `${s.current ? "* " : "  "}[${i + 1}] ${s.id.slice(0, 8)} (${s.messageCount} 条) ${s.name || s.firstMessage.slice(0, 30)}`); // i18n-ignore：CLI 终端输出
+			cli?.out(lines.length ? lines.join("\n") : "[session] 暂无会话"); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		if (sub === "new") {
+			await runtime.newSession();
+			resyncAll();
+			cli?.out(`[session] 已在当前项目 ${curChatId ?? ""} 下新建会话 ${session.sessionId.slice(0, 8)}`); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		const openM = /^open[ \t]+(\S+)$/i.exec(sub);
+		if (openM) {
+			const q = openM[1]!;
+			const idx = Number(q);
+			const hit = Number.isInteger(idx) && idx >= 1 && idx <= all.length
+				? all[idx - 1]
+				: all.find((s) => s.id.startsWith(q) || s.path === q);
+			if (!hit) {
+				cli?.out(`[session] 未找到会话：${q}`); // i18n-ignore：CLI 终端输出
+				return;
+			}
+			await runtime.switchSession(hit.path);
+			resyncAll();
+			cli?.out(`[session] 已切换会话 ${hit.id.slice(0, 8)}`); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		cli?.out("[session] 用法：/session [list | new | open <序号|id>]"); // i18n-ignore：CLI 终端输出
+		return;
+	}
+	const assetsMatch = /^\/assets(?:[ \t]+([\s\S]*))?$/i.exec(trimmed);
+	if (assetsMatch) {
+		const sub = (assetsMatch[1] ?? "").trim();
+		const curChatDir = chatDirOfSessionDir(session.sessionManager.getSessionDir());
+		if (!curChatDir) {
+			cli?.out("[assets] 当前会话不在项目目录中"); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		if (!sub || sub === "list") {
+			const list = listChatMarkdownAssets(curChatDir);
+			const lines = list.map((a) => `- ${a.relPath} [${a.category}] (${a.size}B)`);
+			cli?.out(lines.length ? lines.join("\n") : "[assets] 当前项目暂无 .md 资产"); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		const readM = /^read[ \t]+(\S+)$/i.exec(sub);
+		if (readM) {
+			const rel = readM[1]!.replace(/\\/g, "/");
+			const target = resolve(curChatDir, rel);
+			if (!insidePath(curChatDir, target) || !target.toLowerCase().endsWith(".md") || !existsSync(target)) {
+				cli?.out(`[assets] 文件不存在或路径无效：${rel}`); // i18n-ignore：CLI 终端输出
+				return;
+			}
+			cli?.out(readFileSync(target, "utf8"));
+			return;
+		}
+		const writeM = /^write[ \t]+(\S+)[ \t]+([\s\S]+)$/i.exec(sub);
+		if (writeM) {
+			const rel = writeM[1]!.replace(/\\/g, "/");
+			const content = writeM[2]!;
+			const target = resolve(curChatDir, rel);
+			if (!insidePath(curChatDir, target) || !target.toLowerCase().endsWith(".md")) {
+				cli?.out(`[assets] 路径无效（仅限当前项目内 .md 文件）：${rel}`); // i18n-ignore：CLI 终端输出
+				return;
+			}
+			mkdirSync(dirname(target), { recursive: true });
+			writeFileSync(target, `${content.trim()}\n`, "utf8");
+			cli?.out(`[assets] 已写入 ${rel}`); // i18n-ignore：CLI 终端输出
+			return;
+		}
+		cli?.out("[assets] 用法：/assets [list | read <相对路径.md> | write <相对路径.md> <内容>]"); // i18n-ignore：CLI 终端输出
 		return;
 	}
 	// ST 式变体：无参 /reroll 与 /swipe 由宿主处理（需重开一拍，扩展命令上下文无此能力）
@@ -3441,7 +3662,7 @@ const sessionInfos = async () => {
 					});
 				}
 			}
-		} else {
+		} else if (!chatEntries || chatOfDir.has(session.sessionManager.getSessionDir())) {
 			// 惰性落盘：首条 assistant 前会话文件可能尚未出现在 SessionManager.list
 			let cardName = names.charName;
 			let boundCard = cardPath;
@@ -3610,6 +3831,7 @@ wss.on("connection", (ws, req) => {
 				return;
 			}
 			try {
+				if (botStreamingFlag && !["bot_manage", "abort", "choice_reply", "ping", "sessions", "draft_history"].includes(frame.type)) throw new Error(t("请先停止生成，再管理副编剧会话"));
 					switch (frame.type) {
 						case "draft_history": {
 							const draft = stage.getWorkspaces().find((d) => d.id === frame.id);
@@ -3629,6 +3851,20 @@ wss.on("connection", (ws, req) => {
 					case "prompt": {
 						const text = String(frame.text ?? "").trim();
 						if (text) await handlePrompt(text);
+						break;
+					}
+					case "bot_prompt": {
+						const text = String(frame.text ?? "").trim();
+						if (text) await handleBotPrompt(text);
+						break;
+					}
+					case "bot_clear": {
+						await manageBot({ action: "new" });
+						broadcast({ type: "notify", level: "info", text: t("已清空副编剧对话记录") });
+						break;
+					}
+					case "bot_manage": {
+						await manageBot(frame.request);
 						break;
 					}
 					case "abort": {
@@ -3711,6 +3947,7 @@ wss.on("connection", (ws, req) => {
 						const path = String(frame.path ?? "");
 						if (!path || path === session.sessionFile) return;
 						await runtime.switchSession(path);
+						broadcast(await listSessions());
 						broadcast({ type: "notify", level: "info", text: t("已切换会话") });
 						break;
 					}

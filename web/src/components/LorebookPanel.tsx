@@ -21,7 +21,7 @@ import {
 	type LoreSearchHit,
 } from "../api.ts";
 import { bumpWatchPanels, ConfirmButton, Field, PanelStatus, SearchInput, Toggle, useAction, usePanelData } from "./kit.tsx";
-import { IconMore } from "./icons.tsx";
+import { IconChevronDown, IconLorebook, IconMore } from "./icons.tsx";
 import { t } from "../i18n/index.ts";
 
 type LoreSort = "book" | "name" | "chars" | "order";
@@ -329,6 +329,7 @@ function BooksSection({
 		watchAgent: true,
 	});
 	const { busy, run } = useAction(toast);
+	const [open, setOpen] = useState(false);
 	const [importing, setImporting] = useState(false);
 	// 用户手动新建一本世界书（8/29：此前只能导入酒馆 JSON，不能自己创作）
 	const [creating, setCreating] = useState(false);
@@ -425,6 +426,7 @@ function BooksSection({
 				first: { title: newFirstTitle.trim() || name, content },
 			});
 			setCreating(false);
+			setOpen(false);
 			setNewName("");
 			setNewFirstTitle("");
 			setNewFirstContent("");
@@ -445,6 +447,7 @@ function BooksSection({
 			toast("info", t("已导入（{n} 条）——点书名看条目，勾选才挂进会话", { n: r.entryCount }));
 			reload();
 			onView({ kind: "file", path: r.path });
+			setOpen(false);
 			// 条目区等其它 watch 订阅一并刷新
 			bumpWatchPanels();
 		} catch (e) {
@@ -456,155 +459,200 @@ function BooksSection({
 
 	const viewingFile = view?.kind === "file" ? view.path : null;
 	const viewingAgent = view?.kind === "agent";
+	const currentBook = viewingFile ? data?.books.find((b) => b.path === viewingFile) : undefined;
+	const currentMounted = viewingFile ? activeSet.has(viewingFile) : false;
+	const currentTitle = currentBook
+		? currentBook.name
+		: viewingAgent
+			? t("agent 补充设定")
+			: t("未选择");
+	const isExpanded = open || creating || (!!data && data.books.length === 0 && !viewingAgent);
 
 	return (
-		<section className="sp-section">
-			<h4>{t("世界书")}</h4>
-			<div className="field-hint">
-				<strong>{t("勾选")}</strong>{t("＝挂进会话（可多本）·")} <strong>{t("点书名")}</strong>{t("＝下方只显示该本条目（不合并其它书）。")}
-			</div>
+		<section className="sp-section book-filter-section">
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
 			{data && (
-				<>
-					<div className="book-row book-toolbar">
-						<span className="lore-meta">{t("会话已挂 {n} 本", { n: active.length })}</span>
-						{active.length > 0 && (
-							<button type="button" className="act" disabled={busy} onClick={() => clearAll()}>
-								{t("全部卸下")}
-							</button>
+				<div className={`book-filter-card ${isExpanded ? "open" : ""}`}>
+					<button
+						type="button"
+						className="book-filter-trigger"
+						aria-expanded={isExpanded}
+						onClick={() => setOpen((v) => !v)}
+					>
+						<IconLorebook size={15} className="book-filter-icon" />
+						<span className="book-filter-name">{currentTitle}</span>
+						{currentBook && (
+							<span className="lore-meta">{t("{n} 条条目", { n: currentBook.entryCount })}</span>
 						)}
-					</div>
-					{data.books.map((b) => {
-						const mounted = activeSet.has(b.path);
-						const viewing = viewingFile === b.path;
-						return (
-							<div key={b.path} className={`book-item-wrap ${viewing ? "current" : ""}`}>
-								<div className={`book-row ${viewing ? "current" : ""}`}>
-								<button
-									type="button"
-									className="book-check"
-									disabled={busy}
-									title={mounted ? t("卸下（不进会话）") : t("挂载（进会话）")}
-									onClick={(ev) => toggleMount(b.path, ev)}
-								>
-									<span className={`check ${mounted ? "on" : ""}`} aria-checked={mounted} role="checkbox" />
-								</button>
-								<button
-									type="button"
-									className="book-pick"
-									title={t("查看条目：{path}", { path: b.path })}
-									onClick={() => onView({ kind: "file", path: b.path })}
-								>
-									<span className="book-name">{b.name}</span>
-									<span className="lore-meta">{t("{n} 条条目", { n: b.entryCount })}</span>
-									{mounted && <span className="lore-meta book-mounted-tag">{t("已挂")}</span>}
-								</button>
-								<button
-									type="button"
-									className={`book-more-btn ${actionBook === b.path ? "active" : ""}`}
-									title={actionBook === b.path ? t("收起操作") : t("更多操作")}
-									aria-label={t("更多操作")}
-									onClick={(ev) => {
-										ev.stopPropagation();
-										setActionBook(actionBook === b.path ? null : b.path);
-									}}
-								>
-									<IconMore size={16} />
-								</button>
-							</div>
-							{actionBook === b.path && (
-								<div className="book-actions-bar">
-									<button type="button" className="act" onClick={() => void exportBook(b.path)}>
-										{t("导出")}
+						{viewingAgent && (
+							<span className="lore-meta">{t("按卡自动")}</span>
+						)}
+						{currentBook && currentMounted && (
+							<span className="lore-meta book-mounted-tag">{t("已挂")}</span>
+						)}
+						<span className="book-filter-right">
+							<span className="lore-meta">{t("会话已挂 {n} 本", { n: active.length })}</span>
+							<IconChevronDown size={15} className={`book-filter-caret ${isExpanded ? "open" : ""}`} />
+						</span>
+					</button>
+
+					{isExpanded && (
+						<div className="book-filter-dropdown">
+							<div className="book-filter-head">
+								<div className="field-hint">
+									<strong>{t("勾选")}</strong>{t("＝挂进会话（可多本）·")} <strong>{t("点书名")}</strong>{t("＝下方只显示该本条目（不合并其它书）。")}
+								</div>
+								{active.length > 0 && (
+									<button type="button" className="act" disabled={busy} onClick={() => clearAll()}>
+										{t("全部卸下")}
 									</button>
-									{b.path.startsWith("assets/lorebooks/") && (
-										<ConfirmButton disabled={busy} confirmText={t("确认删除")} onConfirm={() => remove(b.path)}>
-											{t("删除")}
-										</ConfirmButton>
-									)}
+								)}
+							</div>
+							<div className="book-filter-list">
+								{data.books.map((b) => {
+									const mounted = activeSet.has(b.path);
+									const viewing = viewingFile === b.path;
+									return (
+										<div key={b.path} className={`book-item-wrap ${viewing ? "current" : ""}`}>
+											<div className={`book-row ${viewing ? "current" : ""}`}>
+												<button
+													type="button"
+													className="book-check"
+													disabled={busy}
+													title={mounted ? t("卸下（不进会话）") : t("挂载（进会话）")}
+													onClick={(ev) => toggleMount(b.path, ev)}
+												>
+													<span className={`check ${mounted ? "on" : ""}`} aria-checked={mounted} role="checkbox" />
+												</button>
+												<button
+													type="button"
+													className="book-pick"
+													title={t("查看条目：{path}", { path: b.path })}
+													onClick={() => {
+														onView({ kind: "file", path: b.path });
+														setOpen(false);
+													}}
+												>
+													<span className="book-name">{b.name}</span>
+													<span className="lore-meta">{t("{n} 条条目", { n: b.entryCount })}</span>
+													{mounted && <span className="lore-meta book-mounted-tag">{t("已挂")}</span>}
+												</button>
+												<button
+													type="button"
+													className={`book-more-btn ${actionBook === b.path ? "active" : ""}`}
+													title={actionBook === b.path ? t("收起操作") : t("更多操作")}
+													aria-label={t("更多操作")}
+													onClick={(ev) => {
+														ev.stopPropagation();
+														setActionBook(actionBook === b.path ? null : b.path);
+													}}
+												>
+													<IconMore size={16} />
+												</button>
+											</div>
+											{actionBook === b.path && (
+												<div className="book-actions-bar">
+													<button type="button" className="act" onClick={() => void exportBook(b.path)}>
+														{t("导出")}
+													</button>
+													{b.path.startsWith("assets/lorebooks/") && (
+														<ConfirmButton disabled={busy} confirmText={t("确认删除")} onConfirm={() => remove(b.path)}>
+															{t("删除")}
+														</ConfirmButton>
+													)}
+												</div>
+											)}
+										</div>
+									);
+								})}
+								<div className={`book-row ${viewingAgent ? "current" : ""}`}>
+									<button
+										type="button"
+										className="book-pick book-pick-full"
+										onClick={() => {
+											onView({ kind: "agent" });
+											setOpen(false);
+										}}
+									>
+										<span className="book-name">{t("agent 补充设定")}</span>
+										<span className="lore-meta">{t("按卡自动")}</span>
+									</button>
+								</div>
+								{data.books.length === 0 && <div className="sp-empty">{t("还没有世界书——可以「＋ 新建」自己写，也可以导入 JSON")}</div>}
+							</div>
+							{creating && (
+								<div className="lore-edit" onClick={(ev) => ev.stopPropagation()}>
+									<Field label={t("书名")} hint={t("文件名同名；建完可直接加条目")}>
+										<input
+											className="panel-search"
+											autoFocus
+											value={newName}
+											placeholder={t("例：主世界设定")}
+											onChange={(ev) => setNewName(ev.target.value)}
+											onKeyDown={(ev) => {
+												if (ev.key === "Enter") void doCreate();
+												if (ev.key === "Escape") setCreating(false);
+											}}
+										/>
+									</Field>
+									<label className="lore-check">
+										<input type="checkbox" checked={newMount} onChange={(ev) => setNewMount(ev.target.checked)} />
+										{t("建完挂进本会话")}
+									</label>
+									<Field label={t("第一条条目")} hint={t("必填——空书挂不上，也不会出现在书单里")}>
+										<input
+											className="panel-search"
+											value={newFirstTitle}
+											placeholder={t("标题，留空用书名")}
+											onChange={(ev) => setNewFirstTitle(ev.target.value)}
+										/>
+									</Field>
+									<textarea
+										className="panel-search lore-content-edit"
+										rows={3}
+										value={newFirstContent}
+										placeholder={t("第一条的正文内容（必填）")}
+										onChange={(ev) => setNewFirstContent(ev.target.value)}
+									/>
+									<div className="panel-row" style={{ marginTop: 6 }}>
+										<button type="button" className="drawer-btn" disabled={busy || !canCreate} onClick={() => void doCreate()}>
+											{t("新建")}
+										</button>
+										<button type="button" className="drawer-btn" onClick={() => setCreating(false)}>
+											{t("取消")}
+										</button>
+									</div>
 								</div>
 							)}
-						</div>
-					);
-					})}
-					<div className={`book-row ${viewingAgent ? "current" : ""}`}>
-						<button type="button" className="book-pick book-pick-full" onClick={() => onView({ kind: "agent" })}>
-							<span className="book-name">{t("agent 补充设定")}</span>
-							<span className="lore-meta">{t("按卡自动")}</span>
-						</button>
-					</div>
-					{data.books.length === 0 && <div className="sp-empty">{t("还没有世界书——可以「＋ 新建」自己写，也可以导入 JSON")}</div>}
-					{creating && (
-						<div className="lore-edit" onClick={(ev) => ev.stopPropagation()}>
-							<Field label={t("书名")} hint={t("文件名同名；建完可直接加条目")}>
-								<input
-									className="panel-search"
-									autoFocus
-									value={newName}
-									placeholder={t("例：主世界设定")}
-									onChange={(ev) => setNewName(ev.target.value)}
-									onKeyDown={(ev) => {
-										if (ev.key === "Enter") void doCreate();
-										if (ev.key === "Escape") setCreating(false);
-									}}
-								/>
-							</Field>
-							<label className="lore-check">
-								<input type="checkbox" checked={newMount} onChange={(ev) => setNewMount(ev.target.checked)} />
-								{t("建完挂进本会话")}
-							</label>
-							<Field label={t("第一条条目")} hint={t("必填——空书挂不上，也不会出现在书单里")}>
-								<input
-									className="panel-search"
-									value={newFirstTitle}
-									placeholder={t("标题，留空用书名")}
-									onChange={(ev) => setNewFirstTitle(ev.target.value)}
-								/>
-							</Field>
-							<textarea
-								className="panel-search lore-content-edit"
-								rows={3}
-								value={newFirstContent}
-								placeholder={t("第一条的正文内容（必填）")}
-								onChange={(ev) => setNewFirstContent(ev.target.value)}
-							/>
-							<div className="panel-row" style={{ marginTop: 6 }}>
-								<button type="button" className="drawer-btn" disabled={busy || !canCreate} onClick={() => void doCreate()}>
-									{t("新建")}
+							<div className="panel-row book-io">
+								<button
+									type="button"
+									className="drawer-btn"
+									title={t("自己新建一本世界书（不必先有酒馆 JSON）")}
+									onClick={() => setCreating((v) => !v)}
+								>
+									{t("＋ 新建世界书")}
 								</button>
-								<button type="button" className="drawer-btn" onClick={() => setCreating(false)}>
-									{t("取消")}
+								<label className="drawer-btn book-import">
+									{importing ? t("导入中…") : t("导入世界书 JSON")}
+									<input
+										type="file"
+										accept=".json,application/json"
+										hidden
+										onChange={(e) => {
+											const f = e.target.files?.[0];
+											if (f) void doImport(f);
+											e.target.value = "";
+										}}
+									/>
+								</label>
+								<button type="button" className="drawer-btn" title={t("导出会话里全部挂载书+补充")} onClick={() => void exportMerged()}>
+									{t("导出合并")}
 								</button>
 							</div>
 						</div>
 					)}
-					<div className="panel-row book-io">
-						<button
-							type="button"
-							className="drawer-btn"
-							title={t("自己新建一本世界书（不必先有酒馆 JSON）")}
-							onClick={() => setCreating((v) => !v)}
-						>
-							{t("＋ 新建世界书")}
-						</button>
-						<label className="drawer-btn book-import">
-							{importing ? t("导入中…") : t("导入世界书 JSON")}
-							<input
-								type="file"
-								accept=".json,application/json"
-								hidden
-								onChange={(e) => {
-									const f = e.target.files?.[0];
-									if (f) void doImport(f);
-									e.target.value = "";
-								}}
-							/>
-						</label>
-						<button type="button" className="drawer-btn" title={t("导出会话里全部挂载书+补充")} onClick={() => void exportMerged()}>
-							{t("导出合并")}
-						</button>
-					</div>
-				</>
+				</div>
 			)}
 		</section>
 	);

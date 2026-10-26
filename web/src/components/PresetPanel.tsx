@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	apiDelete,
 	apiGet,
+	apiGetCacheClear,
 	apiGetPeek,
 	apiPost,
 	apiPut,
@@ -32,16 +33,120 @@ import {
 	type RulesResponse,
 	type RulesSaveResponse,
 } from "../api.ts";
-import { ConfirmButton, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { renderMarkdown } from "./ArtifactPanel.tsx";
+import { IconClose, IconPreset } from "./icons.tsx";
+import { bumpWatchPanels, ConfirmButton, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
 import { t } from "../i18n/index.ts";
 import {
 	appendEntry,
 	deleteEntry,
+	escapeEntryText,
 	parsePromptEntries,
 	setEntryContent,
 	toggleEntry,
 	type PromptEntry,
 } from "../../../src/prompt-entries.ts";
+
+export type PromptScope = "system" | "global" | "agent" | "bot" | "card" | "agents";
+
+export type PresetEditTarget =
+	| {
+			kind?: "prompt";
+			scope: PromptScope;
+			/**
+			 * entry = 查看/编辑指定条目（entryName === "" 表示开头无标题段）
+			 * full  = 查看/编辑整份文件全文
+			 * create = 在该提示词文件下添加新条目
+			 */
+			mode: "entry" | "full" | "create";
+			entryName?: string;
+	  }
+	| {
+			kind: "preset-block";
+			file: string;
+			presetName: string;
+			blockId: string;
+	  }
+	| {
+			kind: "preset-samplers";
+			file: string;
+			presetName: string;
+	  };
+
+interface PromptSlotMeta {
+	scope: PromptScope;
+	title: () => string;
+	file: string;
+	effect: "beat" | "restart";
+	hint: () => string;
+}
+
+const GLOBAL_PROMPT_SLOTS: PromptSlotMeta[] = [
+	{
+		scope: "system",
+		title: () => t("梨园系统提示词"),
+		file: "SYSTEM.md", // i18n-ignore
+		effect: "restart",
+		hint: () => t("梨园底层环境与工作区骨架说明（SYSTEM.md），修改后重启梨园生效。"),
+	},
+	{
+		scope: "global",
+		title: () => t("扮演模式系统提示词"),
+		file: "APPEND_SYSTEM.md", // i18n-ignore
+		effect: "beat",
+		hint: () => t("扮演模式全局常驻系统提示词（APPEND_SYSTEM.md），对所有角色卡的扮演会话生效。"),
+	},
+	{
+		scope: "agent",
+		title: () => t("写作模式系统提示词"),
+		file: "AGENT_APPEND_SYSTEM.md", // i18n-ignore
+		effect: "beat",
+		hint: () => t("写作模式全局常驻系统提示词（AGENT_APPEND_SYSTEM.md），对所有写作模式项目生效。"),
+	},
+	{
+		scope: "bot",
+		title: () => t("助手系统提示词"),
+		file: "BOT.md", // i18n-ignore
+		effect: "beat",
+		hint: () => t("幕后助手（副编剧）全局默认系统提示词与人设（BOT.md），下一拍生效。"),
+	},
+];
+
+const LOCAL_PROMPT_SLOTS: PromptSlotMeta[] = [
+	{
+		scope: "card",
+		title: () => t("局部系统提示词"),
+		file: "APPEND_SYSTEM.md", // i18n-ignore
+		effect: "beat",
+		hint: () => t("当前角色卡的系统提示词（APPEND_SYSTEM.md），仅对本卡生效；预设转译的身份/破限条目也会落入此处。"),
+	},
+	{
+		scope: "agents",
+		title: () => t("提示词"),
+		file: "AGENTS.md", // i18n-ignore
+		effect: "beat",
+		hint: () => t("当前角色卡的常驻提示词档案（AGENTS.md），包含角色设定、预设写作规则与挂载世界书常驻条目。"),
+	},
+];
+
+const ALL_PROMPT_SLOTS: PromptSlotMeta[] = [...GLOBAL_PROMPT_SLOTS, ...LOCAL_PROMPT_SLOTS];
+
+function contentOfScope(
+	rulesData: RulesResponse | null,
+	agentsData: CardAgentsResponse | null,
+	scope: PromptScope,
+): string {
+	if (scope === "agents") {
+		if (!agentsData) return "";
+		return agentsData.content.trim() ? agentsData.content : agentsData.projection;
+	}
+	if (!rulesData) return "";
+	if (scope === "system") return rulesData.system?.content ?? "";
+	if (scope === "global") return rulesData.global?.content ?? "";
+	if (scope === "agent") return rulesData.agent?.content ?? "";
+	if (scope === "bot") return rulesData.bot?.content ?? "";
+	return rulesData.card?.content ?? "";
+}
 
 const CHANNEL_LABEL: Record<string, string> = {
 	system: "历史前", // i18n-ignore：用时 t()
@@ -83,336 +188,85 @@ function SourceBadge({ entry }: { entry: PromptEntry }) {
 	);
 }
 
-/** 条目形提示词文件的双视图编辑器（GitHub 式 条目|源码）：文件是真源，条目是投影 */
-function EntriesEditor({
-	title,
-	initial,
-	onSave,
-	busy,
-	effect = "beat",
-}: {
-	title: string;
-	initial: string;
-	onSave: (content: string) => Promise<void>;
-	busy: boolean;
-	/** 保存后何时生效：beat=下一拍（默认），restart=需重启 */
-	effect?: "beat" | "restart";
-}) {
-	const [text, setText] = useState(initial);
-	const [dirty, setDirty] = useState(false);
-	const [view, setView] = useState<"entries" | "source">("entries");
-	const [open, setOpen] = useState<string | null>(null);
-	const [drafts, setDrafts] = useState<Record<string, string>>({});
-	const [creating, setCreating] = useState(false);
-	const [newName, setNewName] = useState("");
-	const [newContent, setNewContent] = useState("");
-	const [createError, setCreateError] = useState<string | null>(null);
-	const lastInitial = useRef(initial);
-	useEffect(() => {
-		if (!dirty && initial !== lastInitial.current) setText(initial);
-		lastInitial.current = initial;
-	}, [initial, dirty]);
-
-	const entries = useMemo(() => parsePromptEntries(text), [text]);
-	const apply = (next: string | null) => {
-		if (next !== null) {
-			setText(next);
-			setDirty(true);
-		}
-	};
-	const effectNote = effect === "restart" ? t("保存后重启生效") : t("保存后下一拍生效");
-
-	const confirmCreate = () => {
-		const name = newName.trim();
-		if (!name) return;
-		if (entries.some((e) => e.name === name)) {
-			setCreateError(t("已有同名条目「{name}」", { name }));
-			return;
-		}
-		const next = appendEntry(text, name, newContent);
-		if (next === null) return;
-		apply(next);
-		setCreating(false);
-		setOpen(name);
-		setDrafts((d) => ({ ...d, [name]: newContent }));
-	};
-	const cancelCreate = () => {
-		setCreating(false);
-		setCreateError(null);
-	};
-
-	return (
-		<section className="sp-section">
-			<div className="preset-chan-head">
-				<h4>{title}</h4>
-				<div className="preset-block-acts">
-					<div className="preset-tabs" role="tablist" style={{ margin: 0 }}>
-						<button
-							type="button"
-							role="tab"
-							aria-selected={view === "entries"}
-							className={`preset-tab ${view === "entries" ? "active" : ""}`}
-							onClick={() => setView("entries")}
-						>
-							{t("条目")}
-						</button>
-						<button
-							type="button"
-							role="tab"
-							aria-selected={view === "source"}
-							className={`preset-tab ${view === "source" ? "active" : ""}`}
-							onClick={() => setView("source")}
-						>
-							{t("源码")}
-						</button>
-					</div>
-					<button
-						className="drawer-btn save-btn"
-						disabled={busy || !dirty}
-						onClick={() => void onSave(text).then(() => setDirty(false))}
-					>
-						{dirty ? t("保存 *") : t("保存")}
-					</button>
-				</div>
-			</div>
-			{view === "source" ? (
-				<textarea
-					className="panel-search ta preset-block-ta"
-					rows={12}
-					spellCheck={false}
-					value={text}
-					disabled={busy}
-					placeholder={t("写给模型的常驻提示词（markdown）…")}
-					onChange={(e) => {
-						setText(e.target.value);
-						setDirty(true);
-					}}
-				/>
-			) : (
-				<>
-					{entries.map((e) => {
-						return (
-						<div key={e.name} className={`lore-item preset-block ${e.enabled ? "" : "off"} ${open === e.name ? "open" : ""}`}>
-							<div className="lore-head">
-								<button
-									type="button"
-									className="preset-block-toggle"
-									aria-expanded={open === e.name}
-									onClick={() => {
-										setOpen(open === e.name ? null : e.name);
-										setDrafts((d) => ({ ...d, [e.name]: e.content }));
-									}}
-								>
-									<span className={`group-caret ${open === e.name ? "open" : ""}`}>▸</span>
-									<div className="block-info">
-										<span className="lore-title">{e.title || t("（开头）")}</span>
-										<SourceBadge entry={e} />
-										<span className="lore-meta">
-											{t("{n} 字 · {state}", { n: e.content.length.toLocaleString(), state: e.enabled ? t("开") : t("关") })}
-										</span>
-									</div>
-								</button>
-								<div className="preset-block-acts">
-									<Toggle checked={e.enabled} disabled={busy} onChange={(v) => apply(toggleEntry(text, e.name, v))} />
-								</div>
-							</div>
-							{open === e.name && (
-								<div className="preset-block-body">
-									<label className="field-label">{t("正文")}</label>
-									<textarea
-										className="panel-search ta preset-block-ta"
-										rows={8}
-										spellCheck={false}
-										value={drafts[e.name] ?? e.content}
-										disabled={busy}
-										onChange={(ev) => setDrafts((d) => ({ ...d, [e.name]: ev.target.value }))}
-									/>
-									<div className="panel-row" style={{ marginTop: 6 }}>
-										<button
-											className="act"
-											disabled={busy}
-											onClick={() => {
-												apply(setEntryContent(text, e.name, drafts[e.name] ?? e.content));
-												setOpen(null);
-											}}
-										>
-											{t("保存条目")}
-										</button>
-										<button className="act" onClick={() => setOpen(null)}>
-											{t("收起")}
-										</button>
-										<ConfirmButton
-											className="act preset-del-btn"
-											disabled={busy}
-											confirmText={t("确认删除")}
-											onConfirm={() => {
-												apply(deleteEntry(text, e.name));
-												setOpen(null);
-											}}
-										>
-											{t("删除")}
-										</ConfirmButton>
-									</div>
-								</div>
-							)}
-						</div>
-						);
-					})}
-					{creating && (
-						<div className="lore-item preset-block open">
-							<div className="lore-head">
-								<div className="block-info" style={{ flex: 1 }}>
-									<input
-										className="panel-search"
-										placeholder={t("条目名（## 小节标题）")}
-										value={newName}
-										disabled={busy}
-										autoFocus
-										onChange={(ev) => {
-											setNewName(ev.target.value);
-											setCreateError(null);
-										}}
-										onKeyDown={(ev) => {
-											if (ev.key === "Enter") void confirmCreate();
-											if (ev.key === "Escape") cancelCreate();
-										}}
-									/>
-								</div>
-							</div>
-							<div className="preset-block-body">
-								<label className="field-label">{t("正文")}</label>
-								<textarea
-									className="panel-search ta preset-block-ta"
-									rows={6}
-									spellCheck={false}
-									value={newContent}
-									disabled={busy}
-									onChange={(ev) => setNewContent(ev.target.value)}
-								/>
-								{createError && (
-									<div className="field-hint" style={{ color: "var(--danger, #e07a5f)" }}>
-										{createError}
-									</div>
-								)}
-								<div className="panel-row" style={{ marginTop: 6 }}>
-									<button className="act" disabled={busy || !newName.trim()} onClick={() => void confirmCreate()}>
-										{t("添加")}
-									</button>
-									<button className="act" onClick={() => cancelCreate()}>
-										{t("取消")}
-									</button>
-								</div>
-							</div>
-						</div>
-					)}
-					<div className="panel-row" style={{ marginTop: 6 }}>
-						<button
-							className="act"
-							disabled={busy || creating}
-							onClick={() => {
-								setCreating(true);
-								setNewName("");
-								setNewContent("");
-								setCreateError(null);
-							}}
-						>
-							{t("＋ 添加条目")}
-						</button>
-					</div>
-				</>
-			)}
-			<div className="field-hint">
-				{t("{n} 字", { n: text.length.toLocaleString() })}{dirty ? t(" · 未保存") : ""} · {effectNote}
-			</div>
-		</section>
-	);
-}
-
-/** 底座 blob 编辑器（SYSTEM.md 用）：纯源码 */
-function RulesEditor({
-	title,
-	initial,
-	onSave,
-	busy,
-	effect = "beat",
-}: {
-	title: string;
-	initial: string;
-	onSave: (content: string) => Promise<void>;
-	busy: boolean;
-	effect?: "beat" | "restart";
-}) {
-	const [text, setText] = useState(initial);
-	const [dirty, setDirty] = useState(false);
-	// 外部重载（面板重开/换卡）时同步进编辑框：没动过的直接跟随，动过的保留用户手里的
-	const lastInitial = useRef(initial);
-	useEffect(() => {
-		if (!dirty && initial !== lastInitial.current) {
-			setText(initial);
-		}
-		lastInitial.current = initial;
-	}, [initial, dirty]);
-
-	return (
-		<section className="sp-section">
-			<div className="preset-chan-head">
-				<h4>{title}</h4>
-				<button
-					className="drawer-btn save-btn"
-					disabled={busy || !dirty}
-					onClick={() => void onSave(text).then(() => setDirty(false))}
-				>
-					{dirty ? t("保存 *") : t("保存")}
-				</button>
-			</div>
-			<textarea
-				className="panel-search ta preset-block-ta"
-				rows={12}
-				spellCheck={false}
-				value={text}
-				disabled={busy}
-				placeholder={t("写给模型的常驻提示词（markdown）…")}
-				onChange={(e) => {
-					setText(e.target.value);
-					setDirty(true);
-				}}
-			/>
-			<div className="field-hint">
-				{t("{n} 字", { n: text.length.toLocaleString() })}{dirty ? t(" · 未保存") : ""} · {effect === "restart" ? t("保存后重启生效") : t("保存后下一拍生效")}
-			</div>
-		</section>
-	);
-}
-
 export function PresetPanel({
 	toast,
+	editorTarget = null,
+	onChangeEditorTarget,
 }: {
 	toast: (level: "info" | "warning" | "error", text: string) => void;
+	editorTarget?: PresetEditTarget | null;
+	onChangeEditorTarget?: (target: PresetEditTarget | null) => void;
 }) {
-	const files = usePanelData(() => apiGet<PresetsResponse>("/api/presets"), { cacheKey: "/api/presets" });
-	const rules = usePanelData(() => apiGet<RulesResponse>("/api/rules"), { cacheKey: "/api/rules" });
-	const agents = usePanelData(() => apiGet<CardAgentsResponse>("/api/card-agents"), { cacheKey: "/api/card-agents" });
+	const files = usePanelData(() => apiGet<PresetsResponse>("/api/presets"), { cacheKey: "/api/presets", watchAgent: true });
+	const rules = usePanelData(() => apiGet<RulesResponse>("/api/rules"), { cacheKey: "/api/rules", watchAgent: true });
+	const agents = usePanelData(() => apiGet<CardAgentsResponse>("/api/card-agents"), { cacheKey: "/api/card-agents", watchAgent: true });
 	const { busy, run } = useAction(toast);
 
 	const [tab, setTab] = useState<"global" | "local" | "library">("global");
 	const [showDiff, setShowDiff] = useState(false);
+	const [openScopes, setOpenScopes] = useState<Record<PromptScope, boolean>>({
+		system: false,
+		global: false,
+		agent: false,
+		bot: false,
+		card: false,
+		agents: false,
+	});
+	const [openAgentsCats, setOpenAgentsCats] = useState<Record<"preset" | "lorebook" | "custom", boolean>>({
+		preset: false,
+		lorebook: false,
+		custom: false,
+	});
 
-	const saveRules = useCallback(
-		async (scope: "global" | "agent" | "card", content: string) => {
+	const saveScopeContent = useCallback(
+		async (scope: PromptScope, content: string) => {
+			if (scope === "agents") {
+				const r = await apiPut<CardAgentsSaveResponse>("/api/card-agents", { content });
+				toast("info", t("卡档案已保存（{n} 字），下一拍生效", { n: r.chars.toLocaleString() }));
+				apiGetCacheClear("/api/presets");
+				apiGetCacheClear("/api/preset");
+				apiGetCacheClear("/api/lorebook");
+				files.reload();
+				agents.reload();
+				bumpWatchPanels();
+				return;
+			}
 			const r = await apiPut<RulesSaveResponse>("/api/rules", { scope, content });
-			toast("info", t("已保存（{n} 字），下一拍生效", { n: r.chars.toLocaleString() }));
+			if (scope === "system") {
+				toast("info", t("SYSTEM.md 已保存（{n} 字）——重启梨园后生效", { n: r.chars.toLocaleString() }));
+			} else {
+				toast("info", t("已保存（{n} 字），下一拍生效", { n: r.chars.toLocaleString() }));
+			}
+			if (scope === "card") {
+				apiGetCacheClear("/api/presets");
+				apiGetCacheClear("/api/preset");
+				files.reload();
+			}
+			rules.reload();
+			bumpWatchPanels();
 		},
-		[toast],
+		[toast, rules, agents, files],
 	);
 
-	/** SYSTEM.md：全局系统提示词（改后重启生效，提示语随保存回执） */
-	const saveSystem = useCallback(
-		async (content: string) => {
-			const r = await apiPut<RulesSaveResponse>("/api/rules", { scope: "system", content });
-			toast("info", t("SYSTEM.md 已保存（{n} 字）——重启梨园后生效", { n: r.chars.toLocaleString() }));
-		},
-		[toast],
-	);
+	const togglePromptEntry = (scope: PromptScope, rawText: string, entryName: string, enabled: boolean) =>
+		run(async () => {
+			const next = toggleEntry(rawText, entryName, enabled);
+			if (next === null) return;
+			await saveScopeContent(scope, next);
+		});
+
+	const toggleScopeAccordion = (slot: PromptSlotMeta, entries: PromptEntry[]) => {
+		const willOpen = !openScopes[slot.scope];
+		setOpenScopes((prev) => ({ ...prev, [slot.scope]: willOpen }));
+		// 若该文件只有单段无标题正文（如 SYSTEM.md），展开时同步在右侧展开编辑器，免去二次点击
+		if (willOpen && entries.length <= 1 && (!entries[0] || !entries[0].name)) {
+			onChangeEditorTarget?.({
+				scope: slot.scope,
+				mode: entries.length === 1 ? "entry" : "full",
+				entryName: entries[0]?.name ?? "",
+			});
+		}
+	};
 
 	// ---------------- 预设库：装载 / 保存（2026-09-14 用户定序：先编辑原版，再装载处理） ----------------
 
@@ -432,41 +286,24 @@ export function PresetPanel({
 			agents.reload();
 		});
 
-	/** 保存：把活动预设的未落盘改动写回文件（与编辑器工具条的「保存」同一条端点） */
-	const savePreset = () =>
-		run(async () => {
-			await apiPost("/api/preset/save", {});
-			setDirty(false);
-			files.reload();
-		}, t("预设已保存到文件"));
-
 	/** 卸载：不再使用活动预设（文件保留在库里；卡文件里的预设条目由服务端剥净） */
 	const unloadPreset = () =>
 		run(async () => {
 			await apiPost("/api/presets/select", { file: null });
 			toast("info", t("已卸载——预设文件保留在库里"));
+			if (editorTarget?.kind === "preset-samplers") onChangeEditorTarget?.(null);
 			files.reload();
 			rules.reload();
 			agents.reload();
-		});
-
-	/** 机制自选（2026-09-14 用户定案）：declare＝快速处理（30 秒级，逐块照搬）；process＝深度处理（分钟级，模型重组） */
-	const changeMode = (file: string, mode: string) =>
-		run(async () => {
-			await apiPut("/api/presets/mode", { file, mode });
-			files.reload();
-			if (activeFile === file) {
-				rules.reload();
-				agents.reload();
-				if (mode === "process") toast("info", t("已切到「深度处理」——点「重新装载」生成产物（要几分钟）"));
-			}
+			bumpWatchPanels();
 		});
 
 	// ---------------- 库内任意预设：不装载也能展开拨开关（2026-09-14 用户点名） ----------------
 
 	type BlockRow = PresetBlockView & { content: string };
 	const [openFile, setOpenFile] = useState<string | null>(null);
-	const [openBlockKey, setOpenBlockKey] = useState<string | null>(null);
+	const [renamingFile, setRenamingFile] = useState<string | null>(null);
+	const [renameValue, setRenameValue] = useState("");
 	const [blockDetails, setBlockDetails] = useState<Record<string, { dirty: boolean; blocks: BlockRow[] } | undefined>>({});
 	const blockPatchQueue = useRef<Map<string, Map<string, boolean>>>(new Map());
 	const blockPatchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -492,7 +329,6 @@ export function PresetPanel({
 			return;
 		}
 		setOpenFile(file);
-		setOpenBlockKey(null);
 		void loadBlocks(file);
 	};
 
@@ -517,78 +353,48 @@ export function PresetPanel({
 				void apiPut("/api/presets/blocks", b)
 					.then(() => {
 						if (b.file === activeFile) {
+							setDirty(true);
 							rules.reload();
 							agents.reload();
 						}
+						bumpWatchPanels();
 					})
 					.catch((e) => toast("error", e instanceof Error ? e.message : String(e)));
 			}
 		}, 280);
 	};
 
-	/** 卡档案（刀3）：保存 / 删除回投影 */
-	const saveAgents = useCallback(
-		async (content: string) => {
-			const r = await apiPut<CardAgentsSaveResponse>("/api/card-agents", { content });
-			toast("info", t("卡档案已保存（{n} 字），下一拍生效", { n: r.chars.toLocaleString() }));
-			agents.reload();
-		},
-		[toast, agents],
-	);
-
+	/** 卡档案（刀3）：删除回投影 */
 	const deleteAgents = () =>
 		run(async () => {
 			await apiDelete("/api/card-agents");
 			toast("info", t("已删除卡档案——回到自动投影"));
+			if (editorTarget && editorTarget.kind !== "preset-block" && editorTarget.kind !== "preset-samplers" && editorTarget.scope === "agents") {
+				onChangeEditorTarget?.(null);
+			}
 			agents.reload();
+			bumpWatchPanels();
 		});
 
-	// ---------------- 遗留态：未迁移的活动预设（块级编辑，与旧面板一致） ----------------
+	// ---------------- 活动预设草稿状态 ----------------
 
-	type DraftBlock = PresetBlockView & { content: string };
-	type DraftPreset = { name: string; samplers: Record<string, number>; blocks: DraftBlock[] };
 	type FullPresetResponse = PresetResponse & {
 		dirty?: boolean;
 		preset: { name: string; samplers: Record<string, number>; blocks: Array<PresetBlockView & { content?: string }> } | null;
 	};
 	const PRESET_FULL_PATH = "/api/preset?full=1&working=1";
 
-	const [draft, setDraft] = useState<DraftPreset | null>(null);
 	const [dirty, setDirty] = useState(false);
 	const [missing, setMissing] = useState<string | undefined>();
-	const [loadingDetail, setLoadingDetail] = useState(false);
-	const [loadError, setLoadError] = useState<string | null>(null);
-	const applyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-	const pendingRef = useRef<PresetBlockPatch[]>([]);
-	const pendingSamplersRef = useRef<Record<string, number> | null>(null);
 	const activeFile = files.data?.active ?? null;
 
 	const loadFromDisk = useCallback(async () => {
-		if (!apiGetPeek<FullPresetResponse>(PRESET_FULL_PATH)) setLoadingDetail(true);
-		setLoadError(null);
 		try {
 			const r = await apiGet<FullPresetResponse>(PRESET_FULL_PATH);
 			setMissing(r.missing);
 			setDirty(r.dirty === true);
-			setDraft(
-				r.preset
-					? {
-							name: r.preset.name,
-							samplers: { ...r.preset.samplers },
-							blocks: r.preset.blocks.map((b) => ({
-								...b,
-								marker: b.marker === true,
-								chars: b.content?.length ?? b.chars,
-								content: b.content ?? "",
-							})),
-						}
-					: null,
-			);
-		} catch (e) {
-			setLoadError(e instanceof Error ? e.message : String(e));
-			setDraft(null);
-		} finally {
-			setLoadingDetail(false);
+		} catch {
+			// ignore
 		}
 	}, []);
 
@@ -596,46 +402,11 @@ export function PresetPanel({
 		if (files.data === null) return;
 		if (activeFile) void loadFromDisk();
 		else {
-			setDraft(null);
+			setDirty(false);
 			setMissing(undefined);
 		}
-	}, [activeFile, files.data, loadFromDisk]);
-
-	/** 采样参数走运行时草稿（PUT /api/preset），280ms 合并 */
-	const applyRuntime = useCallback(
-		(patches: PresetBlockPatch[], samplers?: Record<string, number>) => {
-			pendingRef.current.push(...patches);
-			if (samplers) pendingSamplersRef.current = samplers;
-			if (applyTimer.current) clearTimeout(applyTimer.current);
-			applyTimer.current = setTimeout(() => {
-				const merged = new Map<string, PresetBlockPatch>();
-				for (const p of pendingRef.current) merged.set(p.id, { ...merged.get(p.id), ...p });
-				const body: { blocks: PresetBlockPatch[]; samplers?: Record<string, number> } = {
-					blocks: [...merged.values()],
-				};
-				if (pendingSamplersRef.current) body.samplers = pendingSamplersRef.current;
-				pendingRef.current = [];
-				pendingSamplersRef.current = null;
-				void (async () => {
-					try {
-						await apiPut("/api/preset", body);
-					} catch (e) {
-						toast("error", e instanceof Error ? e.message : String(e));
-					}
-				})();
-			}, 280);
-		},
-		[toast],
-	);
-
-	const patchSamplers = (key: string, value: number) =>
-		setDraft((prev) => {
-			if (!prev) return prev;
-			const samplers = { ...prev.samplers, [key]: value };
-			setDirty(true);
-			applyRuntime([], samplers);
-			return { ...prev, samplers };
-		});
+		if (openFile) void loadBlocks(openFile);
+	}, [activeFile, files.data, loadFromDisk, openFile, loadBlocks]);
 
 	const saveToDisk = () =>
 		run(async () => {
@@ -643,6 +414,7 @@ export function PresetPanel({
 			setDirty(false);
 			files.reload();
 			if (openFile) void loadBlocks(openFile);
+			bumpWatchPanels();
 		}, t("预设已保存到文件"));
 
 	const revertDraft = () =>
@@ -650,6 +422,7 @@ export function PresetPanel({
 			await apiPost("/api/preset/revert", {});
 			await loadFromDisk();
 			if (openFile) void loadBlocks(openFile);
+			bumpWatchPanels();
 		}, t("已恢复为文件中的版本"));
 
 	const doImport = async (file: File) => {
@@ -678,8 +451,301 @@ export function PresetPanel({
 	const removePreset = (file: string) =>
 		run(async () => {
 			await apiDelete(`/api/presets?file=${encodeURIComponent(file)}`);
+			if (openFile === file) setOpenFile(null);
+			if (
+				(editorTarget?.kind === "preset-block" || editorTarget?.kind === "preset-samplers") &&
+				editorTarget.file === file
+			) {
+				onChangeEditorTarget?.(null);
+			}
 			files.reload();
 		}, t("已从预设库删除"));
+
+	const submitRenamePreset = (file: string) => {
+		const nextName = renameValue.trim();
+		if (!nextName) return;
+		void run(async () => {
+			const r = await apiPost<{ ok: boolean; file: string }>("/api/presets/rename", {
+				file,
+				name: nextName,
+			});
+			setRenamingFile(null);
+			if (r.file && r.file !== file) {
+				setBlockDetails((prev) => {
+					const cur = prev[file];
+					if (!cur) return prev;
+					const copy = { ...prev, [r.file]: cur };
+					delete copy[file];
+					return copy;
+				});
+				if (openFile === file) setOpenFile(r.file);
+				if (
+					(editorTarget?.kind === "preset-block" || editorTarget?.kind === "preset-samplers") &&
+					editorTarget.file === file
+				) {
+					onChangeEditorTarget?.({ ...editorTarget, file: r.file, presetName: nextName });
+				}
+			}
+			files.reload();
+			rules.reload();
+			agents.reload();
+			bumpWatchPanels();
+		}, t("已重命名预设"));
+	};
+
+	const renderEntryRow = (
+		slot: PromptSlotMeta,
+		rawText: string,
+		entries: PromptEntry[],
+		e: PromptEntry,
+		hidePresetBadge = false,
+	) => {
+		const isSelected =
+			editorTarget !== null &&
+			editorTarget.kind !== "preset-block" &&
+			editorTarget.kind !== "preset-samplers" &&
+			editorTarget.scope === slot.scope &&
+			editorTarget.mode === "entry" &&
+			editorTarget.entryName === e.name;
+		const entryLabel = e.title || (entries.length === 1 ? slot.title() : t("（开头）"));
+		return (
+			<div
+				key={e.name || "__preamble__"}
+				className={`lore-item preset-block global-entry-row ${e.enabled ? "" : "off"} ${isSelected ? "active open" : ""}`}
+			>
+				<div className="lore-head">
+					<button
+						type="button"
+						className="preset-block-toggle"
+						aria-pressed={isSelected}
+						onClick={() =>
+							onChangeEditorTarget?.(
+								isSelected
+									? null
+									: {
+											scope: slot.scope,
+											mode: "entry",
+											entryName: e.name,
+										},
+							)
+						}
+					>
+						<div className="block-info">
+							<span className="lore-title">{entryLabel}</span>
+							{!(hidePresetBadge && e.source?.kind === "preset") && <SourceBadge entry={e} />}
+							<span className="lore-meta">
+								{e.name
+									? t("{n} 字 · {state}", {
+											n: e.content.length.toLocaleString(),
+											state: e.enabled ? t("开") : t("关"),
+										})
+									: t("{n} 字", {
+											n: e.content.length.toLocaleString(),
+										})}
+							</span>
+						</div>
+					</button>
+					{e.name !== "" && (
+						<div className="preset-block-acts">
+							<Toggle
+								checked={e.enabled}
+								disabled={busy}
+								onChange={(v) => void togglePromptEntry(slot.scope, rawText, e.name, v)}
+							/>
+						</div>
+					)}
+				</div>
+			</div>
+		);
+	};
+
+	const renderPromptSlot = (slot: PromptSlotMeta) => {
+		const rawText = contentOfScope(rules.data, agents.data, slot.scope);
+		const entries = parsePromptEntries(rawText);
+		const isOpen = openScopes[slot.scope];
+		const isPromptTarget =
+			editorTarget !== null &&
+			editorTarget.kind !== "preset-block" &&
+			editorTarget.kind !== "preset-samplers" &&
+			editorTarget.scope === slot.scope;
+		const isFullSelected = isPromptTarget && editorTarget.mode === "full";
+		const isCreateSelected = isPromptTarget && editorTarget.mode === "create";
+		const isProjection = slot.scope === "agents" && agents.data?.active === "projection";
+		return (
+			<div
+				key={slot.scope}
+				className={`lore-item preset-block global-prompt-group ${isOpen ? "open" : ""}`}
+			>
+				<div className="lore-head global-prompt-head">
+					<button
+						type="button"
+						className="preset-block-toggle"
+						aria-expanded={isOpen}
+						onClick={() => toggleScopeAccordion(slot, entries)}
+					>
+						<span className={`group-caret ${isOpen ? "open" : ""}`}>▸</span>
+						<div className="block-info">
+							<span className="lore-title">{slot.title()}</span>
+							<span className="preset-src-badge">{slot.file}</span>
+							{isProjection && <span className="preset-src-badge">{t("投影")}</span>}
+							<span className="lore-meta">
+								{entries.length > 1
+									? t("{count} 条 · {n} 字", {
+											count: entries.length,
+											n: rawText.length.toLocaleString(),
+										})
+									: t("{n} 字", { n: rawText.length.toLocaleString() })}
+							</span>
+						</div>
+					</button>
+					<div className="preset-block-acts">
+						<button
+							type="button"
+							className={`act ${isFullSelected ? "active" : ""}`}
+							title={t("在右侧展开整份文件查看或编辑")}
+							onClick={() =>
+								onChangeEditorTarget?.(
+									isFullSelected ? null : { scope: slot.scope, mode: "full" },
+								)
+							}
+						>
+							{t("全文")}
+						</button>
+					</div>
+				</div>
+				{isOpen && (
+					<div className="preset-block-body global-prompt-entries">
+						<div className="field-hint" style={{ marginBottom: 6 }}>
+							{slot.hint()}
+						</div>
+						{isProjection && (
+							<div className="field-hint" style={{ marginBottom: 6 }}>
+								{t("还没有卡档案——当前卡内容以自动投影提供。")}
+							</div>
+						)}
+						{slot.scope === "agents" ? (
+							<div className="agents-subcat-list">
+								{(
+									[
+										{
+											key: "preset" as const,
+											label: t("预设"),
+											items: entries.filter((e) => e.source?.kind === "preset"),
+											emptyHint: t("暂无预设转译条目。"),
+										},
+										{
+											key: "lorebook" as const,
+											label: t("世界书"),
+											items: entries.filter((e) => e.source?.kind === "lorebook"),
+											emptyHint: t("暂无挂载世界书常驻条目。"),
+										},
+										{
+											key: "custom" as const,
+											label: t("自定义"),
+											items: entries.filter((e) => !e.source),
+											emptyHint: t("暂无自定义条目，点击下方「＋ 添加条目」编写。"),
+										},
+									]
+								).map((cat) => {
+									const catOpen = openAgentsCats[cat.key];
+									const catChars = cat.items.reduce((sum, item) => sum + item.content.length, 0);
+									return (
+										<div
+											key={cat.key}
+											className={`lore-item preset-block agents-subcat-group ${catOpen ? "open" : ""}`}
+										>
+											<div className="lore-head agents-subcat-head">
+												<button
+													type="button"
+													className="preset-block-toggle"
+													aria-expanded={catOpen}
+													onClick={() =>
+														setOpenAgentsCats((prev) => ({
+															...prev,
+															[cat.key]: !prev[cat.key],
+														}))
+													}
+												>
+													<span className={`group-caret ${catOpen ? "open" : ""}`}>▸</span>
+													<div className="block-info">
+														<span className="lore-title">{cat.label}</span>
+														<span className="lore-meta">
+															{t("{count} 条 · {n} 字", {
+																count: cat.items.length,
+																n: catChars.toLocaleString(),
+															})}
+														</span>
+													</div>
+												</button>
+											</div>
+											{catOpen && (
+												<div className="preset-block-body agents-subcat-entries">
+													{cat.items.length === 0 ? (
+														<div className="sp-empty">{cat.emptyHint}</div>
+													) : (
+														cat.items.map((e) =>
+															renderEntryRow(slot, rawText, entries, e, cat.key === "preset"),
+														)
+													)}
+												</div>
+											)}
+										</div>
+									);
+								})}
+							</div>
+						) : (
+							<>
+								{entries.length === 0 && (
+									<div className="sp-empty">{t("暂无条目，点击下方「＋ 添加条目」或右上角「全文」编写。")}</div>
+								)}
+								{entries.map((e) => renderEntryRow(slot, rawText, entries, e))}
+							</>
+						)}
+						<div className="panel-row" style={{ marginTop: 6 }}>
+							<button
+								type="button"
+								className={`act ${isCreateSelected ? "active" : ""}`}
+								disabled={busy}
+								onClick={() => {
+									if (slot.scope === "agents") {
+										setOpenAgentsCats((prev) => ({ ...prev, custom: true }));
+									}
+									onChangeEditorTarget?.({
+										scope: slot.scope,
+										mode: "create",
+									});
+								}}
+							>
+								{t("＋ 添加条目")}
+							</button>
+							{slot.scope === "agents" && agents.data && (
+								<>
+									<button type="button" className="act" disabled={busy} onClick={() => setShowDiff((v) => !v)}>
+										{showDiff ? t("收起对照") : t("对照投影")}
+									</button>
+									{agents.data.exists && (
+										<ConfirmButton
+											className="act preset-del-btn"
+											disabled={busy}
+											confirmText={t("确认删除（回到投影）")}
+											onConfirm={() => void deleteAgents()}
+										>
+											{t("删除")}
+										</ConfirmButton>
+									)}
+								</>
+							)}
+						</div>
+						{slot.scope === "agents" && showDiff && agents.data && (
+							<pre className="field-hint" style={{ whiteSpace: "pre-wrap", maxHeight: 260, overflow: "auto", marginTop: 6 }}>
+								{diffPreview(agents.data.projection, agents.data.content || agents.data.projection)}
+							</pre>
+						)}
+					</div>
+				)}
+			</div>
+		);
+	};
 
 	return (
 		<div className="panel-body">
@@ -689,7 +755,17 @@ export function PresetPanel({
 					role="tab"
 					aria-selected={tab === "global"}
 					className={`preset-tab ${tab === "global" ? "active" : ""}`}
-					onClick={() => setTab("global")}
+					onClick={() => {
+						if (
+							editorTarget &&
+							(editorTarget.kind === "preset-block" ||
+								editorTarget.kind === "preset-samplers" ||
+								!GLOBAL_PROMPT_SLOTS.some((s) => s.scope === editorTarget.scope))
+						) {
+							onChangeEditorTarget?.(null);
+						}
+						setTab("global");
+					}}
 				>
 					{t("全局系统提示词")}
 				</button>
@@ -698,7 +774,17 @@ export function PresetPanel({
 					role="tab"
 					aria-selected={tab === "local"}
 					className={`preset-tab ${tab === "local" ? "active" : ""}`}
-					onClick={() => setTab("local")}
+					onClick={() => {
+						if (
+							editorTarget &&
+							(editorTarget.kind === "preset-block" ||
+								editorTarget.kind === "preset-samplers" ||
+								!LOCAL_PROMPT_SLOTS.some((s) => s.scope === editorTarget.scope))
+						) {
+							onChangeEditorTarget?.(null);
+						}
+						setTab("local");
+					}}
 				>
 					{t("局部提示词")}
 					{agents.data?.active === "projection" ? <span className="preset-tab-count">{t("投影")}</span> : null}
@@ -708,7 +794,12 @@ export function PresetPanel({
 					role="tab"
 					aria-selected={tab === "library"}
 					className={`preset-tab ${tab === "library" ? "active" : ""}`}
-					onClick={() => setTab("library")}
+					onClick={() => {
+						if (editorTarget && editorTarget.kind !== "preset-block" && editorTarget.kind !== "preset-samplers") {
+							onChangeEditorTarget?.(null);
+						}
+						setTab("library");
+					}}
 				>
 					{t("预设库")}
 					{activeFile ? <span className="preset-tab-count">{t("已装载")}</span> : null}
@@ -719,75 +810,24 @@ export function PresetPanel({
 				<>
 					<PanelStatus loading={rules.loading} error={rules.error} hasData={!!rules.data} />
 					{rules.data && (
-						<>
-							<RulesEditor
-								title="SYSTEM.md"
-								effect="restart"
-								initial={rules.data.system.content}
-								onSave={(c) => saveSystem(c)}
-								busy={busy}
-							/>
-							<EntriesEditor
-								title={t("APPEND_SYSTEM.md（全局·扮演模式）")}
-								initial={rules.data.global.content}
-								onSave={(c) => saveRules("global", c)}
-								busy={busy}
-							/>
-							<EntriesEditor
-								title={t("AGENT_APPEND_SYSTEM.md（全局·agent 模式）")}
-								initial={rules.data.agent.content}
-								onSave={(c) => saveRules("agent", c)}
-								busy={busy}
-							/>
-						</>
+						<div className="global-prompt-list">
+							{GLOBAL_PROMPT_SLOTS.map((slot) => renderPromptSlot(slot))}
+						</div>
 					)}
 				</>
 			)}
 
 			{tab === "local" && (
 				<>
-					<PanelStatus loading={agents.loading} error={agents.error} hasData={!!agents.data} />
-					{/* APPEND_SYSTEM 放最前：破限/身份条目小而关键，不能被可能极长的 AGENTS.md 条目列表（世界书镜像可达上百条）压到页面底 */}
-					{rules.data && (
-						<EntriesEditor
-							title={t("APPEND_SYSTEM.md（这张卡）")}
-							initial={rules.data.card.content}
-							onSave={(c) => saveRules("card", c)}
-							busy={busy}
-						/>
-					)}
-					{agents.data && (
-						<section className="sp-section">
-							<div className="preset-chan-head">
-								<h4>{t("卡档案")}{agents.data.active === "file" ? t("（生效中）") : t("（未建立）")}</h4>
-								<div className="preset-block-acts">
-									<button className="act" disabled={busy} onClick={() => setShowDiff((v) => !v)}>
-										{showDiff ? t("收起对照") : t("对照投影")}
-									</button>
-									{agents.data.exists && (
-										<ConfirmButton className="act preset-del-btn" disabled={busy} confirmText={t("确认删除（回到投影）")} onConfirm={() => void deleteAgents()}>
-											{t("删除")}
-										</ConfirmButton>
-									)}
-								</div>
-							</div>
-							{agents.data.active === "projection" && (
-								<div className="field-hint">{t("还没有卡档案——当前卡内容以自动投影提供。")}</div>
-							)}
-							{showDiff && (
-								<pre className="field-hint" style={{ whiteSpace: "pre-wrap", maxHeight: 260, overflow: "auto" }}>
-									{diffPreview(agents.data.projection, agents.data.content || agents.data.projection)}
-								</pre>
-							)}
-						</section>
-					)}
-					{agents.data && (
-						<EntriesEditor
-							title={t("AGENTS.md（卡档案）")}
-							initial={agents.data.content}
-							onSave={saveAgents}
-							busy={busy}
-						/>
+					<PanelStatus
+						loading={rules.loading || agents.loading}
+						error={rules.error || agents.error}
+						hasData={Boolean(rules.data && agents.data)}
+					/>
+					{rules.data && agents.data && (
+						<div className="global-prompt-list">
+							{LOCAL_PROMPT_SLOTS.map((slot) => renderPromptSlot(slot))}
+						</div>
 					)}
 				</>
 			)}
@@ -811,107 +851,214 @@ export function PresetPanel({
 								/>
 							</label>
 						</div>
-							<PanelStatus loading={files.loading} error={files.error} hasData={!!files.data} />
-						{files.data?.presets.map((p) => {
-							const isActive = activeFile === p.file;
-							const detail = blockDetails[p.file];
-							return (
-								<div key={p.file} className={`lore-item preset-block ${openFile === p.file ? "open" : ""}`}>
-									<div className="lore-head">
-										<button
-											type="button"
-											className="preset-block-toggle"
-											aria-expanded={openFile === p.file}
-											title={t("展开块开关（不必装载即可编辑原版）")}
-											onClick={() => expandPreset(p.file)}
-										>
-											<span className={`group-caret ${openFile === p.file ? "open" : ""}`}>▸</span>
-											<div className="block-info">
-												<span className="lore-title">{p.name}</span>
-												{isActive && <span className="lore-meta">{t("活动预设")}</span>}
-											</div>
-										</button>
-										<div className="preset-block-acts">
-											<select
-												className="preset-mode-select"
-												title={t("快速处理＝分类照搬（30 秒级，逐块条目）；深度处理＝模型重组（分钟级，产物两条）——大预设快速处理偷懒时用深度处理")}
-												value={p.mode ?? "declare"}
-												disabled={busy}
-												onChange={(e) => void changeMode(p.file, e.target.value)}
-											>
-												<option value="declare">{t("快速处理")}</option>
-												<option value="process">{t("深度处理")}</option>
-											</select>
+						<PanelStatus loading={files.loading} error={files.error} hasData={!!files.data} />
+						<div className="global-prompt-list">
+							{files.data?.presets.map((p) => {
+								const isActive = activeFile === p.file;
+								const detail = blockDetails[p.file];
+								const isExpanded = openFile === p.file;
+								const isDirtyPreset = Boolean((isActive && dirty) || detail?.dirty);
+								const isSamplersSelected =
+									editorTarget?.kind === "preset-samplers" && editorTarget.file === p.file;
+								const visibleBlocks = detail ? detail.blocks.filter((b) => !b.marker) : [];
+								return (
+									<div
+										key={p.file}
+										className={`lore-item preset-block global-prompt-group ${isExpanded ? "open" : ""}`}
+									>
+										<div className="lore-head global-prompt-head">
 											<button
-												className="act"
-												disabled={busy}
-												title={
-													isActive
-														? (p.mode ?? "declare") === "process"
-															? t("丢弃草稿、强制重跑深度处理（要几分钟）")
-															: t("丢弃草稿与声明缓存，重新编译并重问一次模型（约 30 秒）")
-														: undefined
-												}
-												onClick={() => void loadPreset(p.file, isActive)}
+												type="button"
+												className="preset-block-toggle"
+												aria-expanded={isExpanded}
+												title={t("展开块开关（不必装载即可编辑原版）")}
+												onClick={() => expandPreset(p.file)}
 											>
-												{isActive ? t("重新装载") : t("装载")}
+												<span className={`group-caret ${isExpanded ? "open" : ""}`}>▸</span>
+												<div className="block-info">
+													<span className="lore-title">{p.name}</span>
+													{isActive && <span className="preset-src-badge preset">{t("活动预设")}</span>}
+													{detail && (
+														<span className="lore-meta">
+															{t("{count} 条", { count: visibleBlocks.length })}
+														</span>
+													)}
+												</div>
 											</button>
-										</div>
-									</div>
-									{openFile === p.file && (
-										<div className="preset-block-body">
-											<div className="panel-row" style={{ marginBottom: 8 }}>
+											<div className="preset-block-acts">
 												<button
+													type="button"
 													className="act"
-													disabled={busy || !isActive}
-													title={t("把未落盘的改动写回预设文件")}
-													onClick={() => void savePreset()}
-												>
-													{t("保存")}
-												</button>
-												<button className="act" disabled={busy} onClick={() => void doExport(p.file)}>
-													{t("导出")}
-												</button>
-												<ConfirmButton
-													className="act preset-del-btn"
 													disabled={busy}
-													confirmText={t("确认删除")}
-													onConfirm={() => void removePreset(p.file)}
+													title={
+														isActive
+															? t("丢弃草稿与声明缓存，重新编译并重问一次模型（约 30 秒）")
+															: undefined
+													}
+													onClick={() => void loadPreset(p.file, isActive)}
 												>
-													{t("删除")}
-												</ConfirmButton>
+													{isActive ? t("重新装载") : t("装载")}
+												</button>
+												{isActive && (
+													<ConfirmButton
+														className="act"
+														disabled={busy}
+														confirmText={t("确认卸载（卡文件里的预设条目一并移除，预设文件保留）")}
+														onConfirm={() => void unloadPreset()}
+													>
+														{t("卸载")}
+													</ConfirmButton>
+												)}
 											</div>
-											{!detail && <div className="field-hint">{t("读取中…")}</div>}
-											{detail && (
-												<>
-													{detail.dirty && (
-														<div className="field-hint preset-dirty-hint">
-															{t("有未保存修改（运行时草稿）——「保存」在本栏上方，写回后生效。")}
-														</div>
+										</div>
+										{isExpanded && (
+											<div className="preset-block-body global-prompt-entries">
+												<div className="panel-row" style={{ marginBottom: 4 }}>
+													{isActive && (
+														<>
+															<button
+																type="button"
+																className="act"
+																disabled={busy || !isDirtyPreset}
+																title={t("把未落盘的改动写回预设文件")}
+																onClick={() => void saveToDisk()}
+															>
+																{isDirtyPreset ? t("保存 *") : t("保存")}
+															</button>
+															<button
+																type="button"
+																className="act"
+																disabled={busy || !isDirtyPreset}
+																onClick={() => void revertDraft()}
+															>
+																{t("还原")}
+															</button>
+															<button
+																type="button"
+																className={`act ${isSamplersSelected ? "active" : ""}`}
+																disabled={busy}
+																onClick={() =>
+																	onChangeEditorTarget?.(
+																		isSamplersSelected
+																			? null
+																			: {
+																					kind: "preset-samplers",
+																					file: p.file,
+																					presetName: p.name,
+																				},
+																	)
+																}
+															>
+																{t("采样参数")}
+															</button>
+														</>
 													)}
-													{detail.blocks.filter((b) => !b.marker).length === 0 && (
-														<div className="sp-empty">{t("该预设没有可拨的块。")}</div>
-													)}
-													{detail.blocks
-														.filter((b) => !b.marker)
-														.map((b) => {
-															const key = `${p.file}::${b.id}`;
-															const open = openBlockKey === key;
+													<button
+														type="button"
+														className={`act ${renamingFile === p.file ? "active" : ""}`}
+														disabled={busy}
+														onClick={() => {
+															if (renamingFile === p.file) {
+																setRenamingFile(null);
+															} else {
+																setRenamingFile(p.file);
+																setRenameValue(p.name);
+															}
+														}}
+													>
+														{t("重命名")}
+													</button>
+													<button type="button" className="act" disabled={busy} onClick={() => void doExport(p.file)}>
+														{t("导出")}
+													</button>
+													<ConfirmButton
+														className="act preset-del-btn"
+														disabled={busy}
+														confirmText={t("确认删除")}
+														onConfirm={() => void removePreset(p.file)}
+													>
+														{t("删除")}
+													</ConfirmButton>
+												</div>
+												{renamingFile === p.file && (
+													<div className="panel-row" style={{ marginBottom: 6 }}>
+														<input
+															className="panel-search"
+															style={{ flex: 1, minWidth: 0 }}
+															value={renameValue}
+															disabled={busy}
+															autoFocus
+															placeholder={t("输入新预设名…")}
+															onChange={(ev) => setRenameValue(ev.target.value)}
+															onKeyDown={(ev) => {
+																if (ev.key === "Enter") submitRenamePreset(p.file);
+																if (ev.key === "Escape") setRenamingFile(null);
+															}}
+														/>
+														<button
+															type="button"
+															className="act"
+															disabled={busy || !renameValue.trim() || renameValue.trim() === p.name}
+															onClick={() => submitRenamePreset(p.file)}
+														>
+															{t("确定")}
+														</button>
+														<button
+															type="button"
+															className="act"
+															disabled={busy}
+															onClick={() => setRenamingFile(null)}
+														>
+															{t("取消")}
+														</button>
+													</div>
+												)}
+												{!detail && <div className="field-hint">{t("读取中…")}</div>}
+												{detail && (
+													<>
+														{isDirtyPreset && (
+															<div className="field-hint preset-dirty-hint">
+																{t("有未保存修改：已转译、已用于对话；点「保存」写回预设文件。")}
+															</div>
+														)}
+														{visibleBlocks.length === 0 && (
+															<div className="sp-empty">{t("该预设没有可拨的块。")}</div>
+														)}
+														{visibleBlocks.map((b) => {
+															const isSelected =
+																editorTarget?.kind === "preset-block" &&
+																editorTarget.file === p.file &&
+																editorTarget.blockId === b.id;
 															return (
-																<div key={b.id} className={`lore-item preset-block ${b.enabled ? "" : "off"} ${open ? "open" : ""}`}>
+																<div
+																	key={b.id}
+																	className={`lore-item preset-block global-entry-row ${b.enabled ? "" : "off"} ${isSelected ? "active open" : ""}`}
+																>
 																	<div className="lore-head">
 																		<button
 																			type="button"
 																			className="preset-block-toggle"
-																			aria-expanded={open}
-																			onClick={() => setOpenBlockKey(open ? null : key)}
+																			aria-pressed={isSelected}
+																			onClick={() =>
+																				onChangeEditorTarget?.(
+																					isSelected
+																						? null
+																						: {
+																								kind: "preset-block",
+																								file: p.file,
+																								presetName: p.name,
+																								blockId: b.id,
+																							},
+																				)
+																			}
 																		>
-																			<span className={`group-caret ${open ? "open" : ""}`}>▸</span>
 																			<div className="block-info">
 																				<span className="lore-title">{b.name || b.id}</span>
-																				<span className="preset-src-badge preset">{t("预设")}</span>
 																				<span className="lore-meta">
-																					{t("{n} 字 · {channel}", { n: b.content.length.toLocaleString(), channel: CHANNEL_LABEL[b.channel] ? t(CHANNEL_LABEL[b.channel]) : b.channel })}
+																					{t("{n} 字 · {channel}", {
+																						n: b.content.length.toLocaleString(),
+																						channel: CHANNEL_LABEL[b.channel] ? t(CHANNEL_LABEL[b.channel]) : b.channel,
+																					})}
 																					{b.depth !== undefined ? t(" · 深度{depth}", { depth: b.depth }) : ""}
 																				</span>
 																			</div>
@@ -924,98 +1071,645 @@ export function PresetPanel({
 																			/>
 																		</div>
 																	</div>
-																	{open && (
-																		<div className="preset-block-body">
-																			<label className="field-label">{t("正文")}</label>
-																			<textarea
-																				className="panel-search ta preset-block-ta"
-																				rows={10}
-																				spellCheck={false}
-																				readOnly
-																				value={b.content}
-																			/>
-																			{b.content.trim().length === 0 && (
-																				<div className="field-hint">{t("无正文（求值后零字或 setvar 类块：装配时会被丢弃，开关无效果）")}</div>
-																			)}
-																			<div className="panel-row" style={{ marginTop: 6 }}>
-																				<button className="act" onClick={() => setOpenBlockKey(null)}>
-																					{t("收起")}
-																				</button>
-																			</div>
-																		</div>
-																	)}
 																</div>
 															);
 														})}
-													<div className="field-hint">
-														{t("拨开关＝编辑这份预设的原版选项：活动预设进草稿（「保存」落盘）并即时重转译；未装载的直接写文件，装载时生效。")}
-													</div>
-													{(p.mode ?? "declare") === "process" && (
 														<div className="field-hint">
-															{t("这份预设用「深度处理」：拨开关后产物不自动更新，要点「重新装载」重跑（要几分钟）。")}
+															{t("拨开关＝编辑这份预设的原版选项：活动预设进草稿（「保存」落盘）并即时重转译；未装载的直接写文件，装载时生效。")}
 														</div>
-													)}
-												</>
-											)}
-										</div>
-									)}
-								</div>
-							);
-						})}
+													</>
+												)}
+											</div>
+										)}
+									</div>
+								);
+							})}
+						</div>
 						{files.data && files.data.presets.length === 0 && (
 							<div className="sp-empty">{t("预设库是空的。")}</div>
 						)}
+						{missing && <div className="panel-error">{t("配置指向的预设文件不存在：{file}", { file: missing })}</div>}
 					</section>
-
-					{activeFile && (
-						<section className="sp-section">
-							<div className="preset-chan-head">
-								<h4>{t("活动预设")}</h4>
-								<ConfirmButton className="act" disabled={busy} confirmText={t("确认卸载（卡文件里的预设条目一并移除，预设文件保留）")} onConfirm={() => void unloadPreset()}>
-									{t("卸载")}
-								</ConfirmButton>
-							</div>
-							<div className="field-hint">
-								{t("装载即转译：按开关编译、快速处理分类后落进这张卡的提示词文件（局部提示词里带「预设」徽标的条目）。在上面的预设库里展开该预设拨开关即自动更新。")}
-							</div>
-							<div className="panel-row list-toolbar preset-actions">
-								<button className="drawer-btn save-btn" disabled={busy || !dirty} onClick={() => void saveToDisk()}>
-									{dirty ? t("保存 *") : t("保存")}
-								</button>
-								<button className="drawer-btn" disabled={busy || !dirty} onClick={() => void revertDraft()}>
-									{t("还原")}
-								</button>
-							</div>
-							{dirty && (
-								<div className="field-hint preset-dirty-hint">
-									{t("有未保存修改：已转译、已用于对话；点「保存」写回预设文件。")}
-								</div>
-							)}
-							<PanelStatus loading={loadingDetail} error={loadError} hasData={!!draft || !!missing} />
-							{missing && <div className="panel-error">{t("配置指向的预设文件不存在：{file}", { file: missing })}</div>}
-							{draft && (
-								<section className="sp-section">
-									{Object.keys(draft.samplers).length === 0 && (
-										<div className="sp-empty">{t("该预设未带采样参数。")}</div>
-									)}
-									{SAMPLER_META.filter((m) => m.key in draft.samplers).map((m) => (
-										<SliderField
-											key={m.key}
-											label={m.key}
-											hint={t(m.hint)}
-											value={draft.samplers[m.key]}
-											min={m.min}
-											max={m.max}
-											step={m.step}
-											onChange={(nv) => patchSamplers(m.key, nv)}
-										/>
-									))}
-								</section>
-							)}
-						</section>
-					)}
 				</>
 			)}
 		</div>
 	);
 }
+
+/**
+ * 右侧扩出的全局提示词编辑器副栏（420px，与 ConnectEditorPane 同级）：
+ * 分两种阅读模式：「观看模式」（Markdown 渲染）与「Markdown 原文」（源码查看与编辑）。
+ */
+export function PresetEditorPane({
+	target,
+	onChangeTarget,
+	onClose,
+	toast,
+}: {
+	target: PresetEditTarget;
+	onChangeTarget: (target: PresetEditTarget | null) => void;
+	onClose: () => void;
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	if (target.kind === "preset-block") {
+		return <PresetBlockEditorSubPane target={target} onClose={onClose} toast={toast} />;
+	}
+	if (target.kind === "preset-samplers") {
+		return <PresetSamplersSubPane target={target} onClose={onClose} toast={toast} />;
+	}
+	return <PromptSlotEditorSubPane target={target} onChangeTarget={onChangeTarget} onClose={onClose} toast={toast} />;
+}
+
+function PresetBlockEditorSubPane({
+	target,
+	onClose,
+	toast,
+}: {
+	target: Extract<PresetEditTarget, { kind: "preset-block" }>;
+	onClose: () => void;
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const blockPath = `/api/presets/blocks?file=${encodeURIComponent(target.file)}`;
+	const blocksData = usePanelData(() => apiGet<PresetBlocksResponse>(blockPath), {
+		cacheKey: blockPath,
+		watchAgent: true,
+	});
+	const { busy, run } = useAction(toast);
+
+	const block = useMemo(
+		() => blocksData.data?.blocks.find((b) => b.id === target.blockId) ?? null,
+		[blocksData.data, target.blockId],
+	);
+	const sourceContent = block?.content ?? "";
+
+	const [viewMode, setViewMode] = useState<"preview" | "raw">("preview");
+	const [draft, setDraft] = useState(sourceContent);
+	const [dirty, setDirty] = useState(false);
+
+	const targetKey = `${target.file}::${target.blockId}`;
+	const lastTargetKey = useRef(targetKey);
+	const lastSource = useRef(sourceContent);
+
+	useEffect(() => {
+		if (targetKey !== lastTargetKey.current) {
+			lastTargetKey.current = targetKey;
+			lastSource.current = sourceContent;
+			setDraft(sourceContent);
+			setDirty(false);
+			return;
+		}
+		if (!dirty && sourceContent !== lastSource.current) {
+			setDraft(sourceContent);
+		}
+		lastSource.current = sourceContent;
+	}, [targetKey, sourceContent, dirty]);
+
+	const patchBlock = useCallback(
+		async (patch: PresetBlockPatch) => {
+			await apiPut("/api/presets/blocks", {
+				file: target.file,
+				blocks: [patch],
+			});
+			blocksData.reload();
+			bumpWatchPanels();
+		},
+		[target.file, blocksData],
+	);
+
+	const handleSave = useCallback(() => {
+		if (!block) return;
+		void run(async () => {
+			await patchBlock({ id: block.id, content: draft });
+			setDirty(false);
+		}, t("已保存（{n} 字），下一拍生效", { n: draft.length.toLocaleString() }));
+	}, [block, draft, patchBlock, run]);
+
+	const handleToggle = (enabled: boolean) => {
+		if (!block) return;
+		void run(async () => {
+			await patchBlock({ id: block.id, enabled });
+		});
+	};
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape" && !dirty) {
+				onClose();
+			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+				if (!busy && dirty) {
+					e.preventDefault();
+					handleSave();
+				}
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [onClose, handleSave, dirty, busy]);
+
+	const headerTitle = block?.name || block?.id || target.blockId;
+	const channelText = block
+		? CHANNEL_LABEL[block.channel]
+			? t(CHANNEL_LABEL[block.channel])
+			: block.channel
+		: "";
+
+	return (
+		<aside className="rc-lore-picker conn-editor-sub preset-editor-sub" aria-label={headerTitle}>
+			<div className="panel-head rc-lore-picker-head">
+				<span className="panel-head-title" title={headerTitle}>
+					<IconPreset size={15} />
+					<span>{headerTitle}</span>
+				</span>
+				<span className="panel-head-actions">
+					<div className="preset-tabs preset-sub-tabs" role="tablist">
+						<button
+							type="button"
+							role="tab"
+							aria-selected={viewMode === "preview"}
+							className={`preset-tab ${viewMode === "preview" ? "active" : ""}`}
+							onClick={() => setViewMode("preview")}
+						>
+							{t("观看模式")}
+						</button>
+						<button
+							type="button"
+							role="tab"
+							aria-selected={viewMode === "raw"}
+							className={`preset-tab ${viewMode === "raw" ? "active" : ""}`}
+							onClick={() => setViewMode("raw")}
+						>
+							{t("Markdown 原文")}
+						</button>
+					</div>
+					<button type="button" className="icon-btn" onClick={onClose} title={t("关闭")} aria-label={t("关闭")}>
+						<IconClose size={15} />
+					</button>
+				</span>
+			</div>
+
+			<div className="panel-body conn-editor-sub-body preset-editor-sub-body">
+				<div className="preset-sub-toolbar">
+					<div className="preset-sub-meta">
+						<span className="preset-src-badge preset">{target.presetName}</span>
+						<span className="field-hint" style={{ margin: 0 }}>
+							{block
+								? t("{n} 字 · {channel}", {
+										n: draft.length.toLocaleString(),
+										channel: channelText,
+									}) + (block.depth !== undefined ? t(" · 深度{depth}", { depth: block.depth }) : "")
+								: t("{n} 字", { n: draft.length.toLocaleString() })}
+							{dirty ? t(" · 未保存") : ""}
+						</span>
+					</div>
+					<div className="preset-block-acts">
+						{block && (
+							<Toggle checked={block.enabled} disabled={busy} onChange={(v) => handleToggle(v)} />
+						)}
+						<button
+							type="button"
+							className="drawer-btn save-btn"
+							disabled={busy || !dirty}
+							onClick={handleSave}
+						>
+							{dirty ? t("保存 *") : t("保存")}
+						</button>
+					</div>
+				</div>
+
+				{viewMode === "preview" ? (
+					draft.trim().length > 0 ? (
+						<article
+							className="chat-asset-readme artifact-md preset-sub-readme"
+							onDoubleClick={() => setViewMode("raw")}
+						>
+							{renderMarkdown(draft)}
+						</article>
+					) : (
+						<div className="chat-asset-empty">
+							{t("无正文（求值后零字或 setvar 类块：装配时会被丢弃，开关无效果）")}
+						</div>
+					)
+				) : (
+					<textarea
+						className="panel-search ta preset-block-ta preset-sub-textarea"
+						rows={20}
+						spellCheck={false}
+						value={draft}
+						disabled={busy}
+						placeholder={t("写给模型的常驻提示词（markdown）…")}
+						onChange={(e) => {
+							setDraft(e.target.value);
+							setDirty(true);
+						}}
+					/>
+				)}
+			</div>
+		</aside>
+	);
+}
+
+function PresetSamplersSubPane({
+	target,
+	onClose,
+	toast,
+}: {
+	target: Extract<PresetEditTarget, { kind: "preset-samplers" }>;
+	onClose: () => void;
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	type FullPresetResponse = PresetResponse & {
+		dirty?: boolean;
+		preset: { name: string; samplers: Record<string, number>; blocks: Array<PresetBlockView & { content?: string }> } | null;
+	};
+	const PRESET_FULL_PATH = "/api/preset?full=1&working=1";
+	const presetData = usePanelData(() => apiGet<FullPresetResponse>(PRESET_FULL_PATH), {
+		cacheKey: PRESET_FULL_PATH,
+		watchAgent: true,
+	});
+	const { busy, run } = useAction(toast);
+	const [samplers, setSamplers] = useState<Record<string, number>>({});
+	const [dirty, setDirty] = useState(false);
+	const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	useEffect(() => {
+		if (presetData.data?.preset) {
+			setSamplers({ ...presetData.data.preset.samplers });
+			setDirty(presetData.data.dirty === true);
+		}
+	}, [presetData.data]);
+
+	const patchSampler = (key: string, value: number) => {
+		const next = { ...samplers, [key]: value };
+		setSamplers(next);
+		setDirty(true);
+		if (timerRef.current) clearTimeout(timerRef.current);
+		timerRef.current = setTimeout(() => {
+			void apiPut("/api/preset", { blocks: [], samplers: next })
+				.then(() => bumpWatchPanels())
+				.catch((e) => toast("error", e instanceof Error ? e.message : String(e)));
+		}, 280);
+	};
+
+	const saveToDisk = () =>
+		run(async () => {
+			await apiPost("/api/preset/save", {});
+			setDirty(false);
+			presetData.reload();
+			bumpWatchPanels();
+		}, t("预设已保存到文件"));
+
+	const headerTitle = `${target.presetName} · ${t("采样参数")}`;
+
+	return (
+		<aside className="rc-lore-picker conn-editor-sub preset-editor-sub" aria-label={headerTitle}>
+			<div className="panel-head rc-lore-picker-head">
+				<span className="panel-head-title" title={headerTitle}>
+					<IconPreset size={15} />
+					<span>{headerTitle}</span>
+				</span>
+				<span className="panel-head-actions">
+					<button
+						type="button"
+						className="drawer-btn save-btn"
+						disabled={busy || !dirty}
+						onClick={() => void saveToDisk()}
+					>
+						{dirty ? t("保存 *") : t("保存")}
+					</button>
+					<button type="button" className="icon-btn" onClick={onClose} title={t("关闭")} aria-label={t("关闭")}>
+						<IconClose size={15} />
+					</button>
+				</span>
+			</div>
+			<div className="panel-body conn-editor-sub-body preset-editor-sub-body">
+				<PanelStatus loading={presetData.loading} error={presetData.error} hasData={!!presetData.data} />
+				{presetData.data?.preset && (
+					<>
+						{Object.keys(samplers).length === 0 && (
+							<div className="sp-empty">{t("该预设未带采样参数。")}</div>
+						)}
+						{SAMPLER_META.filter((m) => m.key in samplers).map((m) => (
+							<SliderField
+								key={m.key}
+								label={m.key}
+								hint={t(m.hint)}
+								value={samplers[m.key]}
+								min={m.min}
+								max={m.max}
+								step={m.step}
+								onChange={(nv) => patchSampler(m.key, nv)}
+							/>
+						))}
+					</>
+				)}
+			</div>
+		</aside>
+	);
+}
+
+function PromptSlotEditorSubPane({
+	target,
+	onChangeTarget,
+	onClose,
+	toast,
+}: {
+	target: Extract<PresetEditTarget, { scope: PromptScope }>;
+	onChangeTarget: (target: PresetEditTarget | null) => void;
+	onClose: () => void;
+	toast: (level: "info" | "warning" | "error", text: string) => void;
+}) {
+	const rules = usePanelData(() => apiGet<RulesResponse>("/api/rules"), { cacheKey: "/api/rules", watchAgent: true });
+	const agents = usePanelData(() => apiGet<CardAgentsResponse>("/api/card-agents"), { cacheKey: "/api/card-agents", watchAgent: true });
+	const { busy, run } = useAction(toast);
+
+	const slot = ALL_PROMPT_SLOTS.find((s) => s.scope === target.scope) ?? ALL_PROMPT_SLOTS[0];
+	const rawFile = contentOfScope(rules.data, agents.data, slot.scope);
+	const entries = useMemo(() => parsePromptEntries(rawFile), [rawFile]);
+
+	const entry = useMemo(() => {
+		if (target.mode !== "entry") return null;
+		const wanted = target.entryName ?? "";
+		return entries.find((e) => e.name === wanted) ?? null;
+	}, [target.mode, target.entryName, entries]);
+
+	const sourceContent = useMemo(() => {
+		if (target.mode === "create") return "";
+		if (target.mode === "full") return rawFile;
+		if (entry) return entry.content;
+		if (!target.entryName && entries.length === 0) return rawFile;
+		return "";
+	}, [target.mode, target.entryName, rawFile, entry, entries.length]);
+
+	const [viewMode, setViewMode] = useState<"preview" | "raw">(
+		target.mode === "create" ? "raw" : "preview",
+	);
+	const [draft, setDraft] = useState(sourceContent);
+	const [dirty, setDirty] = useState(false);
+	const [newName, setNewName] = useState("");
+	const [createError, setCreateError] = useState<string | null>(null);
+
+	const targetKey = `${target.scope}::${target.mode}::${target.entryName ?? ""}`;
+	const lastTargetKey = useRef(targetKey);
+	const lastSource = useRef(sourceContent);
+
+	useEffect(() => {
+		if (targetKey !== lastTargetKey.current) {
+			lastTargetKey.current = targetKey;
+			lastSource.current = sourceContent;
+			setDraft(sourceContent);
+			setDirty(false);
+			setNewName("");
+			setCreateError(null);
+			if (target.mode === "create") setViewMode("raw");
+			return;
+		}
+		if (!dirty && sourceContent !== lastSource.current) {
+			setDraft(sourceContent);
+		}
+		lastSource.current = sourceContent;
+	}, [targetKey, sourceContent, dirty, target.mode]);
+
+	const saveRawFile = useCallback(
+		async (nextFileText: string) => {
+			if (slot.scope === "agents") {
+				const r = await apiPut<CardAgentsSaveResponse>("/api/card-agents", {
+					content: nextFileText,
+				});
+				toast("info", t("卡档案已保存（{n} 字），下一拍生效", { n: r.chars.toLocaleString() }));
+				apiGetCacheClear("/api/presets");
+				apiGetCacheClear("/api/preset");
+				apiGetCacheClear("/api/lorebook");
+				agents.reload();
+				bumpWatchPanels();
+				return;
+			}
+			const r = await apiPut<RulesSaveResponse>("/api/rules", {
+				scope: slot.scope,
+				content: nextFileText,
+			});
+			if (slot.effect === "restart") {
+				toast("info", t("SYSTEM.md 已保存（{n} 字）——重启梨园后生效", { n: r.chars.toLocaleString() }));
+			} else {
+				toast("info", t("已保存（{n} 字），下一拍生效", { n: r.chars.toLocaleString() }));
+			}
+			if (slot.scope === "card") {
+				apiGetCacheClear("/api/presets");
+				apiGetCacheClear("/api/preset");
+			}
+			rules.reload();
+			bumpWatchPanels();
+		},
+		[slot.scope, slot.effect, toast, rules, agents],
+	);
+
+	const handleSave = useCallback(() => {
+		if (target.mode === "create") {
+			const name = newName.trim();
+			if (!name) return;
+			if (entries.some((e) => e.name === name)) {
+				setCreateError(t("已有同名条目「{name}」", { name }));
+				return;
+			}
+			const next = appendEntry(rawFile, name, escapeEntryText(draft));
+			if (next === null) return;
+			void run(async () => {
+				await saveRawFile(next);
+				setDirty(false);
+				setViewMode("preview");
+				onChangeTarget({ scope: slot.scope, mode: "entry", entryName: name });
+			});
+			return;
+		}
+		if (target.mode === "full" || (!entry?.name && entries.length <= 1)) {
+			void run(async () => {
+				await saveRawFile(draft);
+				setDirty(false);
+			});
+			return;
+		}
+		if (!entry) return;
+		const next = setEntryContent(rawFile, entry.name, escapeEntryText(draft));
+		if (next === null) return;
+		void run(async () => {
+			await saveRawFile(next);
+			setDirty(false);
+		});
+	}, [target.mode, newName, entries, rawFile, draft, entry, run, saveRawFile, onChangeTarget, slot.scope]);
+
+	const handleToggleEntry = (enabled: boolean) => {
+		if (!entry || !entry.name) return;
+		const next = toggleEntry(rawFile, entry.name, enabled);
+		if (next === null) return;
+		void run(async () => {
+			await saveRawFile(next);
+		});
+	};
+
+	const handleDeleteEntry = () => {
+		if (!entry || !entry.name) return;
+		const next = deleteEntry(rawFile, entry.name);
+		if (next === null) return;
+		void run(async () => {
+			await saveRawFile(next);
+			onClose();
+		});
+	};
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape" && !dirty) {
+				onClose();
+			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+				if (!busy && (target.mode === "create" ? Boolean(newName.trim()) : dirty)) {
+					e.preventDefault();
+					handleSave();
+				}
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [onClose, handleSave, dirty, busy, target.mode, newName]);
+
+	const headerTitle =
+		target.mode === "create"
+			? t("添加条目")
+			: target.mode === "full"
+				? t("{title} · 全文", { title: slot.title() })
+				: entry?.title || (entries.length <= 1 ? slot.title() : t("（开头）"));
+
+	const effectNote = slot.effect === "restart" ? t("保存后重启生效") : t("保存后下一拍生效");
+	const canSave = target.mode === "create" ? Boolean(newName.trim()) : dirty;
+	const previewMd =
+		target.mode === "create" && newName.trim()
+			? `## ${newName.trim()}\n\n${draft}`
+			: draft;
+
+	return (
+		<aside className="rc-lore-picker conn-editor-sub preset-editor-sub" aria-label={headerTitle}>
+			<div className="panel-head rc-lore-picker-head">
+				<span className="panel-head-title" title={headerTitle}>
+					<IconPreset size={15} />
+					<span>{headerTitle}</span>
+				</span>
+				<span className="panel-head-actions">
+					<div className="preset-tabs preset-sub-tabs" role="tablist">
+						<button
+							type="button"
+							role="tab"
+							aria-selected={viewMode === "preview"}
+							className={`preset-tab ${viewMode === "preview" ? "active" : ""}`}
+							onClick={() => setViewMode("preview")}
+						>
+							{t("观看模式")}
+						</button>
+						<button
+							type="button"
+							role="tab"
+							aria-selected={viewMode === "raw"}
+							className={`preset-tab ${viewMode === "raw" ? "active" : ""}`}
+							onClick={() => setViewMode("raw")}
+						>
+							{t("Markdown 原文")}
+						</button>
+					</div>
+					<button
+						type="button"
+						className="icon-btn"
+						onClick={onClose}
+						title={t("关闭")}
+						aria-label={t("关闭")}
+					>
+						<IconClose size={15} />
+					</button>
+				</span>
+			</div>
+
+			<div className="panel-body conn-editor-sub-body preset-editor-sub-body">
+				<div className="preset-sub-toolbar">
+					<div className="preset-sub-meta">
+						<span className="preset-src-badge">{slot.file}</span>
+						<span className="field-hint" style={{ margin: 0 }}>
+							{t("{n} 字", { n: draft.length.toLocaleString() })}
+							{dirty ? t(" · 未保存") : ""} · {effectNote}
+						</span>
+					</div>
+					<div className="preset-block-acts">
+						{target.mode === "entry" && entry && entry.name !== "" && (
+							<>
+								<Toggle
+									checked={entry.enabled}
+									disabled={busy}
+									onChange={(v) => handleToggleEntry(v)}
+								/>
+								<ConfirmButton
+									className="act preset-del-btn"
+									disabled={busy}
+									confirmText={t("确认删除")}
+									onConfirm={handleDeleteEntry}
+								>
+									{t("删除")}
+								</ConfirmButton>
+							</>
+						)}
+						<button
+							type="button"
+							className="drawer-btn save-btn"
+							disabled={busy || !canSave}
+							onClick={handleSave}
+						>
+							{dirty ? t("保存 *") : t("保存")}
+						</button>
+					</div>
+				</div>
+
+				{target.mode === "create" && (
+					<div className="preset-sub-create-head">
+						<input
+							className="panel-search"
+							placeholder={t("条目名（## 小节标题）")}
+							value={newName}
+							disabled={busy}
+							autoFocus
+							onChange={(ev) => {
+								setNewName(ev.target.value);
+								setCreateError(null);
+							}}
+						/>
+						{createError && (
+							<div className="field-hint" style={{ color: "var(--danger, #e07a5f)" }}>
+								{createError}
+							</div>
+						)}
+					</div>
+				)}
+
+				{viewMode === "preview" ? (
+					previewMd.trim().length > 0 ? (
+						<article
+							className="chat-asset-readme artifact-md preset-sub-readme"
+							onDoubleClick={() => setViewMode("raw")}
+						>
+							{renderMarkdown(previewMd)}
+						</article>
+					) : (
+						<div className="chat-asset-empty">{t("暂无内容")}</div>
+					)
+				) : (
+					<textarea
+						className="panel-search ta preset-block-ta preset-sub-textarea"
+						rows={20}
+						spellCheck={false}
+						value={draft}
+						disabled={busy}
+						placeholder={t("写给模型的常驻提示词（markdown）…")}
+						onChange={(e) => {
+							setDraft(e.target.value);
+							setDirty(true);
+						}}
+					/>
+				)}
+			</div>
+		</aside>
+	);
+}
+

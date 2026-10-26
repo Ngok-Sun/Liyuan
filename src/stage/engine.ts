@@ -18,21 +18,18 @@ import { authoringHistory, authoringRequestIds, contextText, conversationMode, C
 import { authoringTools, runAuthoringTool, AUTHORING_NATIVE_TOOLS } from "./authoring.ts";
 import { AGENT_ASK_TOOL, AGENT_SCREENSHOT_TOOL, agentSystemPrompt, buildAgentStateBlock } from "./agent.ts";
 import {
-	BOT_THREAD_REPLAY,
-	appendBotThread,
 	beatsOf,
 	botThreadPath,
 	botTools,
+	buildBotCardBrief,
 	buildBotSystemPrompt,
-	buildBotView,
 	readBotPersona,
-	readBotThread,
-	runBotLoop,
 	runBotTool,
 	type BotNativeTool,
-	type BotStreamFn,
+	type BotToolCallRecord,
 } from "./bot.ts";
-import { rulesAgentDir } from "../user-rules.ts";
+import type { BotSessionRun } from "./bot-session-types.ts";
+import { rulesAgentDir, readUserRules } from "../user-rules.ts";
 import { describeChange, listStoryFiles, STORY_CHECKPOINT_TYPE, StoryHistory, storyDirectory, type ChangeSet } from "./story-history.ts";
 import { agentHistory, buildDiscussionSummaryPrompt, discussionTokens, DISCUSSION_SUMMARY_TYPE, livePromptTokens, MANUAL_MIN_DISCUSSION_TOKENS, planDiscussionCompaction, promptTokensOfMessages } from "./discussion.ts";
 import { readFileSync } from "node:fs";
@@ -49,9 +46,9 @@ import {
 	searchEntries,
 } from "../lorebook.ts";
 import { formatPanelIndex, formatPanelSnapshot, loadPanels } from "../panels.ts";
-import { cardDirOfChatDir, chatDataPath, chatDirOfSessionDir, chatModeOfSessionDir } from "../cardspace.ts";
+import { cardDirOfChatDir, chatDataPath, chatDirOfSessionDir, chatModeOfSessionDir, readChatMemoryIndex, readChatSummary, writeChatSummary } from "../cardspace.ts";
 import { fitResidentSummary, loadResidentSummary } from "../card-memory.ts";
-import { changeCardMemory, listCardMemory, readCardMemory, searchCardMemory } from "../card-memory-tools.ts";
+import { changeCardMemory, changeChatMemory, listCardMemory, listChatMemory, readCardMemory, readChatMemory, searchCardMemory, searchChatMemory, writeChatMemoryDoc } from "../card-memory-tools.ts";
 import { classifyTag, scanTaggedBlocks } from "../postprocess.ts";
 import { formatRosterIndex, formatState, saveState } from "../state.ts";
 import { isBackstageText } from "../stance.ts";
@@ -286,6 +283,7 @@ export interface StageAgentSession {
 }
 
 export interface StageEngineDeps {
+	runBotSession?: (options: BotSessionRun) => Promise<{ text: string; tools?: BotToolCallRecord[] } | { error: string }>;
 	cwd: string;
 	getSession: () => StageAgentSession;
 	getModel: () => StageModelLike | undefined;
@@ -783,6 +781,8 @@ export class StageEngine {
 		void this.#deps.getSession().abort();
 	}
 
+	abortBot(): void { this.#botAbort?.abort(); }
+
 	/**
 	 * 幕后副编剧的一轮（docs/PLAN-COMPANION-BOT.md 刀 1）：与台前完全隔离的第二个线程。
 	 * 送模内容＝闭合集合（见 bot.ts 文件头）：卡级 APPEND_SYSTEM.md＋BOT.md＋每轮视野块＋线程＋工具回执。
@@ -794,11 +794,15 @@ export class StageEngine {
 	 */
 	async botTurn(
 		text: string,
-		o: { onDelta?: (kind: "text" | "thinking", delta: string) => void; onActivity?: (detail: string) => void } = {},
-	): Promise<{ text: string } | { error: string }> {
+		o: {
+			compact?: boolean;
+			onDelta?: (kind: "text" | "thinking", delta: string) => void;
+			onActivity?: (detail: string) => void;
+			onToolCall?: (record: BotToolCallRecord) => void;
+		} = {},
+	): Promise<{ text: string; tools?: BotToolCallRecord[] } | { error: string }> {
 		if (this.#busy) return { error: "台前正在生成——等这一拍结束（或先停止），再唤副编剧。" };
-		const model = this.#deps.getModel();
-		if (!model) return { error: "尚未配置剧情模型。" };
+		if (!this.#deps.runBotSession) return { error: "副编剧运行时未接入。" };
 		const trimmed = text.trim();
 		if (!trimmed) return { error: "说点什么再唤副编剧。" };
 		this.#busy = true;
@@ -811,47 +815,76 @@ export class StageEngine {
 			const materials = loadStageMaterials(cwd);
 			const chatDir = chatDirOfSessionDir(sm.getSessionDir?.());
 			const cardDir = chatDir ? cardDirOfChatDir(chatDir) : null;
+			const chatAppend = chatDir ? readUserRules(cardDir ?? "", chatDir).chat : undefined;
+			const chatMemoryIndex = readChatMemoryIndex(chatDir);
 			const macro = { charName: materials.card.name, userName: materials.config.userName };
+			const cardBrief = buildBotCardBrief({
+				card: materials.card,
+				userName: materials.config.userName,
+				userPersona: materials.config.userPersona,
+				macro,
+			});
+			const mcpTools = mcpStageTools(this.#deps.mcp);
+			const skills = materials.skillFiles
+				.filter((f) => f.mode !== "authoring")
+				.map((f) => ({ name: f.name, description: f.description }));
+			const envLines = [`工作目录：${cwd}`, `当前角色卡：${materials.config.card}`];
+			if (chatDir) envLines.push(`当前项目目录：${chatDir}`);
 			const systemPrompt = buildBotSystemPrompt({
 				cardAppend: materials.userRules.card,
+				...(chatAppend ? { chatAppend } : {}),
+				cardBrief,
+				...(chatMemoryIndex ? { chatMemoryIndex } : {}),
 				persona: readBotPersona(cardDir, rulesAgentDir()),
 				macro,
-				env: `工作目录：${cwd}\n当前角色卡：${materials.config.card}`,
+				env: envLines.join("\n"),
+				...(mcpTools.length > 0 ? { mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description })) } : {}),
+				includeBaseRules: true,
 			});
 			const branch = sm.getBranch() as BranchEntryLike[];
 			const rebuilt = rebuildHistory(branch, materials.promptRules);
 			const beats = beatsOf(rebuilt.history);
-			const view = buildBotView({ summary: rebuilt.summary, state: formatState(stateFromBranch(branch)), beats });
+			const viewWindow = typeof materials.config.botViewBeats === "number" && materials.config.botViewBeats > 0 ? Math.floor(materials.config.botViewBeats) : 0;
+			const view = {
+				summary: rebuilt.summary || readChatSummary(chatDir),
+				state: formatState(stateFromBranch(branch)),
+				beats,
+				window: viewWindow,
+			};
 			const file = botThreadPath(cwd, sm.getSessionDir?.(), sm.getSessionId());
-			const thread = readBotThread(file).slice(-BOT_THREAD_REPLAY);
 			// 卡族依赖＝读侧 ∪ 宿主 authoring 件（与 agent 模式同一条并法：
 			// card_create/card_project 等只在 authoring 件里，缺了它们工具不上清单）
 			const deps: StageToolDeps = { ...this.#toolDeps("bot"), ...this.#deps.authoring };
 			// backendControl 关＝用户没给通用工具（与台上、agent 模式同一开关、同一语义）
 			const native = materials.config.backendControl === false ? [] : this.#botNativeTools(session, ac);
-			const tools = botTools(materials.config.language, deps, native);
-			const { apiKey, headers } = await this.#deps.getAuth(model);
-			const r = await runBotLoop({
-				stream: this.#deps.sideStreamFn as unknown as BotStreamFn,
-				model,
-				auth: { apiKey, headers },
+			const tools = botTools(materials.config.language, deps, native, { skills, mcp: this.#deps.mcp });
+			const r = await this.#deps.runBotSession({
+				file,
+				cwd,
+				compact: o.compact,
 				systemPrompt,
-				thread,
 				userText: trimmed,
 				view,
 				tools,
-				execute: (name, args) => runBotTool({ deps, tools, native, name, args, language: materials.config.language, beats, signal: ac.signal }),
+				execute: (name, args) =>
+					runBotTool({
+						deps,
+						tools,
+						native,
+						mcp: this.#deps.mcp,
+						name,
+						args,
+						language: materials.config.language,
+						beats,
+						signal: ac.signal,
+					}),
 				onDelta: o.onDelta,
 				onActivity: o.onActivity,
+				onToolCall: o.onToolCall,
 				signal: ac.signal,
-				reasoning: this.#deps.getThinking?.(),
 			});
 			if ("error" in r) return r;
-			if (!r.text.trim()) return { error: "副编剧没有产出内容。" };
-			appendBotThread(file, [
-				{ role: "user", text: trimmed, ts: Date.now() },
-				{ role: "assistant", text: r.text, ts: Date.now() },
-			]);
+			await this.#deps.afterAuthoringTurn?.();
 			return r;
 		} catch (err) {
 			return { error: `副编剧这一轮出错：${err instanceof Error ? err.message : String(err)}` };
@@ -1002,7 +1035,12 @@ export class StageEngine {
 			...(userText !== null ? [{ type: "message", message: nowMsg(userText) }] : []),
 		] as BranchEntryLike[];
 		const state = stateFromBranch(branch);
-		const { history, lastNarrativeText, summary } = rebuildHistory(branch, materials.promptRules);
+		const { history, lastNarrativeText, summary: branchSummary } = rebuildHistory(branch, materials.promptRules);
+		const summary = branchSummary || readChatSummary(chatDir);
+		const chatCardDir = chatDir ? cardDirOfChatDir(chatDir) : null;
+		const chatAppend = chatDir ? readUserRules(chatCardDir ?? "", chatDir).chat : undefined;
+		const userRules = chatAppend ? { ...materials.userRules, chat: chatAppend } : materials.userRules;
+		const chatMemoryIndex = readChatMemoryIndex(chatDir);
 		const lastUserText = userText ?? contextText([...branch].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.message?.content);
 		if (!lastUserText.trim()) {
 			ev.onNotify?.("error", "没有可开演的用户输入。");
@@ -1090,7 +1128,7 @@ export class StageEngine {
 		const rpNames = rpTools.map((t) => t.name);
 		const agentNames = [...new Set([...agentTools.map((t) => t.name), ...nativeNames])];
 		const tools = [...new Map([...agentTools, ...rpTools].map((t) => [t.name, t])).values()];
-		const agentPrompt = agentSystemPrompt({ cwd, cardPath: config.card, storyDir: storyDir!, userRules: materials.userRules, cardAgents: materials.cardAgents, macro: { charName: card.name, userName: config.userName } });
+		const agentPrompt = agentSystemPrompt({ cwd, cardPath: config.card, storyDir: storyDir!, userRules, chatMemoryIndex, cardAgents: materials.cardAgents, macro: { charName: card.name, userName: config.userName } });
 		const ws = createWorkspace({ sessionId: sm.getSessionId(), parentId: sm.getLeafId(),
 			...(userText === null ? { userId: [...branch].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.id } : {}) });
 		const draftStore = new DraftStore(draftDirectory(cwd, sm.getSessionDir?.(), sm.getSessionId()), ws.id);
@@ -1114,7 +1152,8 @@ export class StageEngine {
 			card,
 			config,
 			constantLore: constantLoreOf(materials),
-			userRules: materials.userRules,
+			userRules,
+			chatMemoryIndex,
 			cardAgents: materials.cardAgents,
 			// 预设装配段：原文原序，marker 已按预设作者的位置填入梨园材料
 			presetBefore: materials.presetBefore.map((p) => p.text),
@@ -1143,11 +1182,8 @@ export class StageEngine {
 			...(directorNote?.trim() ? { directorNote } : {}),
 		});
 
-		// 第二步·跨会话记忆（读侧）：卡的常驻摘要与这局的前情共用【前情提要】槽位——
-		// 两者语义同为「更早剧情的既定事实」，本局摘要在前、往局记忆在后。摘要是数据块，
-		// 走既有通道与既有语义句（铁律一/二：零新增文案、零新增注入点）；预算在 card-memory。
-		// authoring 与 agent 模式下每个子项目是独立工程，绝不引入卡级跨项目常驻摘要。
-		const residentSummary = agentTurn ? undefined : this.#residentSummary(sm, summary, state, rosterIndex);
+		// 卡级跨项目常驻摘要已废除（记忆与前情严格限在当前项目内，跨会话通过项目级 前情提要.md 接力）。
+		const residentSummary = undefined;
 		// agent 模式的项目状态块（docs/PLAN-AGENT-CODING.md §六）：与扮演同一份数据，多带稿子目录（不带正文）；每次装配现读目录。
 		const agentStateBlock = (): string => buildAgentStateBlock({ state, rosterIndex, summary, residentSummary, files: listStoryFiles(storyDir!) });
 
@@ -1909,10 +1945,14 @@ export class StageEngine {
 					...(minChars !== undefined ? { minChars } : {}),
 					...(keepRecentBeats !== undefined ? { keepRecentBeats } : {}),
 					...(agentStoryDir ? { storyDir: agentStoryDir } : {}),
+					...(chatDir ? { previousSummaryFallback: readChatSummary(chatDir) } : {}),
 				},
 			);
 			if (c.kind === "failed") console.error(`[stage-compact] 压缩跳过：${c.error}`);
-			if (c.kind === "compacted") sm.flush();
+			if (c.kind === "compacted") {
+				sm.flush();
+				if (chatDir) writeChatSummary(chatDir, c.summary);
+			}
 			// 指示器折算（扮演拍压缩）：压缩改的是装配，不改 pi 的消息列表——不算这一笔，
 			// 右下角会一直停在压缩前，直到下一拍真实 usage 落地。与讨论压缩同法（#compactDiscussion）。
 			// agent 文件压缩压的是正文文件、不动上下文；工作/agent 轮的装配不吃 rp-summary——两者都不折算。
@@ -2092,31 +2132,76 @@ export class StageEngine {
 					const r = search ? await search(sm.getSessionId(), query) : { hits: [], sources: [{ scope: "session", status: "unavailable" as const }] };
 					result = Array.isArray(r) ? { hits: r, sources: [{ scope: "session", status: "ok" }] } : r;
 				} catch (e) { result = { hits: [], sources: [{ scope: "session", status: "error", error: e instanceof Error ? e.message : String(e) }] }; }
-				if (cardDir && this.mode !== "agent") {
+				if (chatDir) {
+					try { result.hits.push(...searchChatMemory(chatDir, query, 6)); result.sources.push({ scope: "chat", status: "ok" }); }
+					catch (e) { result.sources.push({ scope: "chat", status: "error", error: String(e) }); }
+				} else if (cardDir && this.mode !== "agent") {
 					try { result.hits.push(...searchCardMemory(cardDir, query, 6, chatId)); result.sources.push({ scope: "card", status: "ok" }); }
 					catch (e) { result.sources.push({ scope: "card", status: "error", error: String(e) }); }
-				} else if (!cardDir || this.mode === "agent") result.sources.push({ scope: "card", status: "unavailable" });
+				} else {
+					result.sources.push({ scope: "chat", status: "unavailable" });
+				}
 				return result;
 			},
-			...(this.#deps.readMemory || (cardDir && this.mode !== "agent") ? { readMemory: (ref: string) => ref.startsWith("card:")
-				? cardDir ? readCardMemory(cardDir, ref, chatId) : undefined : this.#deps.readMemory?.(sm.getSessionId(), ref) } : {}),
-			...(this.#deps.listMemory || (cardDir && this.mode !== "agent")
-				? { listMemory: (storeId: string) => storeId === "card" ? (cardDir ? listCardMemory(cardDir, chatId).map((d) => ({ ...d, id: d.ref })) : []) : this.#deps.listMemory?.(sm.getSessionId(), storeId) ?? [] }
+			...(this.#deps.readMemory || chatDir || (cardDir && this.mode !== "agent") ? { readMemory: (ref: string) => {
+				if (chatDir && (ref.startsWith("chat:") || !ref.includes(":"))) {
+					const chatDoc = readChatMemory(chatDir, ref);
+					if (chatDoc) return chatDoc;
+				}
+				if (ref.startsWith("card:")) return cardDir ? readCardMemory(cardDir, ref, chatId) : undefined;
+				return this.#deps.readMemory?.(sm.getSessionId(), ref);
+			} } : {}),
+			...(this.#deps.listMemory || chatDir || (cardDir && this.mode !== "agent")
+				? { listMemory: (storeId: string) => {
+					if (storeId === "card") {
+						if (chatDir) return listChatMemory(chatDir).map((d) => ({ ...d, id: d.ref }));
+						return cardDir ? listCardMemory(cardDir, chatId).map((d) => ({ ...d, id: d.ref })) : [];
+					}
+					const sessionList = this.#deps.listMemory?.(sm.getSessionId(), storeId) ?? [];
+					if (chatDir && storeId === "external") {
+						return [...listChatMemory(chatDir).map((d) => ({ ...d, id: d.ref })), ...sessionList];
+					}
+					return sessionList;
+				} }
 				: {}),
-			// ---- 记忆写族（add / update / delete）：幕后专属 ----
-			...(side === "bot" ? {
-				...(cardDir && this.mode !== "agent" ? { updateMemory: (ref: string, version: string, content: string) => changeCardMemory(cardDir, ref, version, content)! } : {}),
-				...(this.#deps.addMemory
-					? { addMemory: (input: { text: string; title?: string }) => this.#deps.addMemory!(sm.getSessionId(), input) }
-					: {}),
-				...(this.#deps.deleteMemory || cardDir
-					? { deleteMemory: (storeId: string, id: string, version?: string) => {
-						if (storeId !== "card") return this.#deps.deleteMemory?.(sm.getSessionId(), storeId, id) ?? false;
-						if (!cardDir) return false;
-						changeCardMemory(cardDir, id, version ?? ""); return true;
-					} }
-					: {}),
+			// ---- 记忆写族（add / update / delete）：主模型（stage）与副编剧（bot）共用，落入当前项目的 记忆/*.md ----
+			...(chatDir || cardDir ? {
+				updateMemory: (ref: string, version: string, content: string) => {
+					if (chatDir && !ref.startsWith("card:")) return changeChatMemory(chatDir, ref, version, content)!;
+					if (cardDir) return changeCardMemory(cardDir, ref, version, content)!;
+					throw new Error("当前不在项目或卡空间内，无法更新记忆文档。");
+				},
 			} : {}),
+			...(chatDir || this.#deps.addMemory
+				? { addMemory: async (input: { text: string; title?: string }) => {
+					if (chatDir) {
+						writeChatMemoryDoc(chatDir, input);
+						if (this.#deps.addMemory) {
+							try { await this.#deps.addMemory(sm.getSessionId(), input); } catch { /* 向量库未启用时不影响项目 .md 记忆落盘 */ }
+						}
+						const total = listChatMemory(chatDir).length;
+						return { added: 1, total, chunks: 1 };
+					}
+					return this.#deps.addMemory!(sm.getSessionId(), input);
+				} }
+				: {}),
+			...(chatDir || this.#deps.deleteMemory || cardDir
+				? { deleteMemory: (storeId: string, id: string, version?: string) => {
+					if (chatDir && (id.startsWith("chat:") || storeId === "card" || !id.includes(":"))) {
+						const existed = readChatMemory(chatDir, id);
+						if (existed) {
+							changeChatMemory(chatDir, id, version);
+							return true;
+						}
+					}
+					if (storeId === "card") {
+						if (!cardDir) return false;
+						changeCardMemory(cardDir, id, version ?? "");
+						return true;
+					}
+					return this.#deps.deleteMemory?.(sm.getSessionId(), storeId, id) ?? false;
+				} }
+				: {}),
 			// ---- M-D4 角色库：读卡面 / M-D7 改卡（改的是用户的卡文件，宿主负责热重载） ----
 			readCard: () => {
 				const m = loadStageMaterials(cwd);

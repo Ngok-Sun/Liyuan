@@ -45,6 +45,8 @@ export interface DeclareEntry {
 	where: "before" | "after" | "depth";
 	chars: number;
 	station: DeclareStation;
+	/** 用户在局部提示词中手动拨动的启停状态（覆盖站点默认启停） */
+	enabled?: boolean;
 	/** 编译片段指纹；只有实际声明且内容未变的条目才能复用 */
 	sourceHash?: string;
 	/** 模型给的一句理由（过目用，≤30 字） */
@@ -169,7 +171,7 @@ export function parseDeclareResponse(text: string, pieces: DeclarePiece[]): Pars
 	const raw = extractJsonArray(text);
 	const errors: string[] = raw ? [] : ["响应不是有效 JSON 数组"];
 	const expected = new Set(pieces.map((p) => p.id));
-	const byId = new Map<string, { station: DeclareStation; note?: string }>();
+	const byId = new Map<string, { station: DeclareStation; note?: string; enabled?: boolean }>();
 	const seen = new Set<string>();
 
 	for (const item of raw ?? []) {
@@ -208,7 +210,11 @@ export function parseDeclareResponse(text: string, pieces: DeclarePiece[]): Pars
 			errors.push(`无效站点：${id}`);
 			continue;
 		}
-		byId.set(id, { station: o.station, note: typeof o.note === "string" ? o.note.slice(0, 60) : undefined });
+		byId.set(id, {
+			station: o.station,
+			note: typeof o.note === "string" ? o.note.slice(0, 60) : undefined,
+			...(typeof o.enabled === "boolean" ? { enabled: o.enabled } : {}),
+		});
 	}
 
 	const entries: DeclareEntry[] = [];
@@ -224,6 +230,7 @@ export function parseDeclareResponse(text: string, pieces: DeclarePiece[]): Pars
 			chars: p.text.length,
 			station: hit?.station ?? "writing",
 			note: hit?.note,
+			...(typeof hit?.enabled === "boolean" ? { enabled: hit.enabled } : {}),
 			...(hit ? { sourceHash: declarePieceHash(p) } : {}),
 		});
 	}
@@ -360,14 +367,17 @@ export function translatePresetWithDeclaration(
 		if (station === "wrapper") {
 			item.action = "wrapper";
 		} else if (station === "identity") {
-			appendEntries.push(formatEntry(uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, appendNames), p.text));
-			item.action = "append";
+			const enabled = e?.enabled ?? true;
+			appendEntries.push(formatEntry(uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, appendNames), p.text, enabled));
+			item.action = enabled ? "append" : "disabled";
 		} else if (station === "writing") {
-			agentsEntries.push(formatEntry(uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, agentsNames), p.text));
-			item.action = "agents";
+			const enabled = e?.enabled ?? true;
+			agentsEntries.push(formatEntry(uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, agentsNames), p.text, enabled));
+			item.action = enabled ? "agents" : "disabled";
 		} else {
-			agentsEntries.push(formatEntry(uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, agentsNames), p.text, false));
-			item.action = "disabled";
+			const enabled = e?.enabled ?? false;
+			agentsEntries.push(formatEntry(uniqueEntryName(p.name, PRESET_SOURCE_SUFFIX, agentsNames), p.text, enabled));
+			item.action = enabled ? "agents" : "disabled";
 		}
 		lines.push(item);
 	}
