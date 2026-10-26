@@ -2947,6 +2947,7 @@ export default function App() {
 								onBack={() => setStoryTab("chat")}
 								chatCollapsed={chatCollapsed}
 								onToggleChat={() => setChatCollapsed((v) => !v)}
+								spriteUrl={spriteOn ? charAvatarUrl : null}
 								onEdit={async (f, text) => {
 									try {
 										await apiPost("/api/story/edit", { name: f.name, text });
@@ -3225,7 +3226,7 @@ export default function App() {
 						</button>
 					)}
 					{/* 角色大立绘（ Chief fork ）：固定悬浮左下，不随滚动；无卡图/关闭时消失；窄屏隐藏 */}
-					{spriteOn && !welcome && charAvatarUrl && (
+					{spriteOn && !welcome && !agentSplit && charAvatarUrl && (
 						<div className="char-sprite" aria-hidden="true">
 							<img src={charAvatarUrl} alt="" draggable={false} />
 						</div>

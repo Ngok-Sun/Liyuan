@@ -126,6 +126,7 @@ export function StoryPane({
 	onEdit,
 	loadDiff,
 	onRestore,
+	spriteUrl,
 }: {
 	/** null＝正文还在拉取 */
 	files: StoryFileView[] | null;
@@ -143,6 +144,8 @@ export function StoryPane({
 	onToggleChat: () => void;
 	/** 用户直接改稿（写文件并落检查点）；抛错＝失败提示 */
 	onEdit: (file: StoryFileView, text: string) => Promise<void>;
+	/** agent 正文框左侧角色立绘（Chief fork）：null/缺省＝不显示；只影响正文页，历史页不显示 */
+	spriteUrl?: string | null;
 	loadDiff: (id: string) => Promise<StoryDiffFile[]>;
 	onRestore: (cp: WireCheckpoint, scope: "files" | "both") => void;
 }) {
@@ -208,7 +211,14 @@ export function StoryPane({
 							))}
 						</nav>
 					)}
-					<div className="story-body">
+					{/* 立绘在左、正文在右（Chief fork）：立绘与滚动容器平级——正文滚起来时立绘不跟着滚 */}
+					<div className={`story-main ${spriteUrl ? "story-main-sprite" : ""}`}>
+						{spriteUrl && (
+							<div className="story-sprite" aria-hidden="true">
+								<img src={spriteUrl} alt="" draggable={false} />
+							</div>
+						)}
+						<div className="story-body">
 						{files && files.length === 0 && (
 							<div className="story-empty">{t("正文还是空的。在右边讨论，agent 会把定稿写入文件。")}</div>
 						)}
@@ -240,6 +250,7 @@ export function StoryPane({
 								)}
 							</article>
 						))}
+						</div>
 					</div>
 				</>
 			)}

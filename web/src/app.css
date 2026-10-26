@@ -11582,6 +11582,56 @@ label.drawer-btn {
 	overflow-y: auto;
 	padding: 28px 32px 96px;
 }
+/*
+ * agent 正文框：立绘在左、正文在右（Chief fork）。
+ * 立绘与滚动容器平级——正文滚动时立绘待在原地，不被卷走；立绘列宽跟着正文框走，
+ * 窄了自动收窄（不是像外面那条空白沟一样被挤成一条缝）。
+ */
+.story-main {
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 0;
+	display: flex;
+}
+.story-main > .story-body {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.story-sprite {
+	position: relative;
+	/* 45% + 顶到 520px：立绘列够宽，contain 才放得大（图是竖构图，宽度决定实际高度） */
+	flex: 0 0 clamp(220px, 45%, 520px);
+	display: flex;
+	align-items: flex-end;
+	justify-content: center;
+	overflow: hidden;
+	pointer-events: none;
+	user-select: none;
+	/* 底部渐隐：下缘融进背景，和正文的留白接上 */
+	-webkit-mask-image: linear-gradient(to bottom, #000 74%, rgba(0, 0, 0, 0.55) 90%, transparent 100%);
+	mask-image: linear-gradient(to bottom, #000 74%, rgba(0, 0, 0, 0.55) 90%, transparent 100%);
+	animation: sprite-in 0.35s ease-out;
+}
+.story-sprite img {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	object-position: bottom center;
+	filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.35)) saturate(0.92);
+	opacity: 0.95;
+	user-select: none;
+	-webkit-user-drag: none;
+}
+/* 有立绘时正文整体靠右：左边让给立绘，右边留一点距离不贴边框 */
+.story-main-sprite .story-body {
+	padding-left: 12px;
+	padding-right: clamp(24px, 3vw, 44px);
+}
+.story-main-sprite .story-chapter {
+	margin-left: auto;
+	margin-right: 0;
+}
 .story-empty {
 	max-width: 720px;
 	margin: 20vh auto 0;
@@ -12281,6 +12331,18 @@ label.drawer-btn {
 	}
 	.story-body {
 		padding: 20px 16px 96px;
+	}
+	/* 手机：正文页放不下立绘，直接不显示，正文回到居中 */
+	.story-sprite {
+		display: none;
+	}
+	.story-main-sprite .story-body {
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+	.story-main-sprite .story-chapter {
+		margin-left: auto;
+		margin-right: auto;
 	}
 }
 
