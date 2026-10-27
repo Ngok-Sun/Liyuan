@@ -11,6 +11,23 @@ Liyuan is an RP Agent built on pi, designed to bring coding agent capabilities i
 
 ---
 
+> ### 分支说明 — `feat/char-sprite`
+>
+> 本分支是上游 **v1.6.5**（`e772387`）的个人 fork，当前 **领先 9 个提交 / 落后 0**，尚未合并上游。
+> 逐条变更点（含根因、改法、验证）：**[docs/CHANGELOG-char-sprite.md](docs/CHANGELOG-char-sprite.md)**
+>
+> **本分支改了什么**
+> - **角色大立绘** — 顶栏新增「立绘」开关，开启后角色卡头像显示在聊天列左侧空白区；点击穿透、760px 以下隐藏，偏好存 `localStorage`。
+> - **正文框立绘** — agent 正文页立绘居左、正文居右（`clamp(220px, 45%, 520px)` 列宽），正文滚动时立绘不跟着走。
+> - **修复：右栏 `agent:` 面板空白** — agent 自建面板改走 `ArtifactPanel` 渲染，不再在 `renderPanel` 里掉成空白列。
+> - **`bashFreeRun` 命令免问档** — 开启后 bash 只在命中 `BASH_DENYLIST.txt` 时被拒，其余整条直接执行（默认关，仅后端操控开启时有意义）。
+> - **修复：旁路条目 `thinkingLevelMap` 丢失** — 把条目自己的思考档 map 盖回运行时模型，关思考才真的不发推理请求。
+> - **`scripts/deploy-omv.sh`** — OMV 一键部署/替换（源码 rsync + compose build），`--official` 可切回官方 ghcr 镜像回滚。
+>
+> 本机验证：`node --test test/sandbox.test.ts test/agent-config.test.ts` → 26/26 通过；`npm run web:build` → exit 0。
+
+---
+
 ## 梨园是什么
 
 梨园是基于 pi 构建的 RP Agent，将 coding agent 的诸多能力 RP 化。目标是以 agent 架构解决传统 rp 项目的诸多问题，为用户带来更好的角色扮演体验。

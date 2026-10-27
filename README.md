@@ -10,6 +10,23 @@
 
 ---
 
+> ### Branch note — `feat/char-sprite`
+>
+> Personal fork of upstream **v1.6.5** (`e772387`), currently **9 commits ahead / 0 behind**, not merged upstream.
+> Full per-commit detail: **[docs/CHANGELOG-char-sprite.md](docs/CHANGELOG-char-sprite.md)**
+>
+> **What this branch changes**
+> - **Character sprite overlay** — new `立绘` button in the top bar shows the card avatar in the empty gutter left of the chat column; click-through, hidden below 760px, preference kept in `localStorage`.
+> - **Sprite inside the agent story pane** — portrait on the left, prose on the right (`clamp(220px, 45%, 520px)` column), fixed while the text scrolls.
+> - **Fix: blank `agent:` panels in the right stage column** — agent-built panels now render through `ArtifactPanel` instead of falling through `renderPanel`.
+> - **`bashFreeRun` option** — bash commands run whole without per-command approval unless they hit `BASH_DENYLIST.txt` (default off; only meaningful with backend control on).
+> - **Fix: per-entry `thinkingLevelMap` for bypass/side entries** — the entry's own thinking map is re-applied to the runtime model, so "thinking: off" really stops reasoning.
+> - **`scripts/deploy-omv.sh`** — one-shot deploy/replace on OMV (source rsync + compose build), `--official` switches back to the ghcr image for rollback.
+>
+> Verified locally: `node --test test/sandbox.test.ts test/agent-config.test.ts` → 26/26 pass; `npm run web:build` → exit 0.
+
+---
+
 ## What is Liyuan?
 
 **Liyuan** (梨园) is a next-generation Role-Play Agent built on top of [pi](https://github.com/earendil-works/pi). By reimagining coding agent primitives for creative storytelling and roleplay, Liyuan tackles the chronic limitations of traditional RP frontends—such as context bloat, setting drift, ungrounded hallucination, prompt clutter, and vendor lock-in—delivering an immersive, transparent, and deterministic role-playing experience.
