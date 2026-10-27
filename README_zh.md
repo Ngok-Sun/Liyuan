@@ -13,7 +13,7 @@ Liyuan is an RP Agent built on pi, designed to bring coding agent capabilities i
 
 > ### 分支说明 — `feat/char-sprite`
 >
-> 本分支是上游 **v1.6.5**（`e772387`）的个人 fork，当前 **领先 9 个提交 / 落后 0**，尚未合并上游。
+> 本分支是上游 **v1.6.5**（`e772387`）的个人 fork，领先上游若干提交，尚未合并回上游。
 > 逐条变更点（含根因、改法、验证）：**[docs/CHANGELOG-char-sprite.md](docs/CHANGELOG-char-sprite.md)**
 >
 > **本分支改了什么**

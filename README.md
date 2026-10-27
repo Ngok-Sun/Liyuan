@@ -12,7 +12,7 @@
 
 > ### Branch note — `feat/char-sprite`
 >
-> Personal fork of upstream **v1.6.5** (`e772387`), currently **9 commits ahead / 0 behind**, not merged upstream.
+> Personal fork tracking upstream **v1.6.5** (`e772387`); it runs ahead of upstream and is not merged back.
 > Full per-commit detail: **[docs/CHANGELOG-char-sprite.md](docs/CHANGELOG-char-sprite.md)**
 >
 > **What this branch changes**
